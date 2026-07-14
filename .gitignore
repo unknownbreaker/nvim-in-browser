@@ -3,5 +3,8 @@ dist/
 memory/
 .superpowers/
 vendor/
+# Chrome for Testing, fetched by scripts/browser-smoke.mjs via
+# `npx @puppeteer/browsers install chrome@stable` on managed machines.
+chrome/
 *.log
 .DS_Store
