@@ -9,7 +9,20 @@
 // ES modules.
 import { isEscapeChord } from "../ui/keymap";
 
+// Compile-time flag (see scripts/build.mjs). esbuild's `define` replaces this
+// with a literal `false` in production builds, so the entire test-hook
+// listener below is dead code that esbuild's minifier strips — the string
+// "nvim-activate-test" does not ship in dist/chromium/content.js.
+declare const __NVIM_TEST_HOOKS__: boolean;
+
 const ELIGIBLE_INPUT_TYPES = new Set(["text", "search", "url", "email", "tel"]);
+
+// How long we wait, after creating the engine-frame iframe, to hear back from
+// it (either "nvim-ready" once it boots, or a "nvim-text" sync) before giving
+// up and tearing the overlay down. Without this, an engine that hangs/crashes
+// before ready leaves an unremovable overlay: the only other deactivation
+// paths are messages *from* that same frame.
+const BOOT_WATCHDOG_MS = 20_000;
 
 type Target = HTMLTextAreaElement | HTMLInputElement;
 let active: { frame: HTMLIFrameElement; target: Target } | null = null;
@@ -61,9 +74,23 @@ function activate(): void {
   document.body.appendChild(frame);
   active = { frame, target };
 
+  // Boot watchdog: if the frame never checks in (hung/crashed before ready),
+  // tear the overlay down instead of leaving it stuck forever.
+  let watchdogTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    watchdogTimer = null;
+    deactivate();
+  }, BOOT_WATCHDOG_MS);
+  const clearWatchdog = (): void => {
+    if (watchdogTimer !== null) {
+      clearTimeout(watchdogTimer);
+      watchdogTimer = null;
+    }
+  };
+
   const onMessage = (ev: MessageEvent): void => {
     if (ev.source !== frame.contentWindow) return;
     const m = ev.data;
+    if (m?.type === "nvim-ready" || m?.type === "nvim-text") clearWatchdog();
     if (m?.type === "nvim-text" && active) {
       setNativeValue(active.target, m.text);
     } else if (m?.type === "nvim-deactivate") {
@@ -85,19 +112,24 @@ function activate(): void {
   window.addEventListener("scroll", reposition, true);
   window.addEventListener("resize", reposition);
 
-  // Defence in depth: while the overlay is active the escape chord is normally
-  // consumed inside the (focused) iframe and never reaches this document. If
-  // focus ever escapes the frame, block the chord in the capture phase so the
-  // host page's own keybindings can't fire.
+  // Escape-chord escape hatch: while the overlay is active the chord is
+  // normally consumed inside the (focused) iframe, which posts back
+  // "nvim-deactivate". But if focus ever escapes the frame back to this
+  // document (e.g. the frame hung before it could grab focus), the chord
+  // must still ALWAYS dismiss the overlay — from either side — so it can
+  // never get stuck. Block it from reaching the host page's own keybindings
+  // AND deactivate directly here.
   const guardEscape = (ev: KeyboardEvent): void => {
     if (active && isEscapeChord(ev)) {
       ev.preventDefault();
       ev.stopImmediatePropagation();
+      deactivate();
     }
   };
   window.addEventListener("keydown", guardEscape, true);
 
   function deactivate(): void {
+    clearWatchdog();
     window.removeEventListener("message", onMessage);
     window.removeEventListener("scroll", reposition, true);
     window.removeEventListener("resize", reposition);
@@ -119,9 +151,16 @@ chrome.runtime.onMessage.addListener((msg) => {
 // postMessage ONLY when the smoke has opted in by stamping the document root
 // (`data-nvim-test-hook="1"`). This keeps the production attack surface minimal:
 // with the attribute absent the branch is inert on real pages.
-window.addEventListener("message", (ev: MessageEvent) => {
-  if (ev.source !== window) return;
-  if (ev.data?.type !== "nvim-activate-test") return;
-  if (document.documentElement.dataset.nvimTestHook !== "1") return;
-  activate();
-});
+//
+// Stripped entirely from production builds (see __NVIM_TEST_HOOKS__ above):
+// any page controls its own DOM, so the dataset gate alone is not a strong
+// enough guarantee to ship this listener at all in production — esbuild's
+// `define` + minifier dead-code-eliminate this whole block instead.
+if (__NVIM_TEST_HOOKS__) {
+  window.addEventListener("message", (ev: MessageEvent) => {
+    if (ev.source !== window) return;
+    if (ev.data?.type !== "nvim-activate-test") return;
+    if (document.documentElement.dataset.nvimTestHook !== "1") return;
+    activate();
+  });
+}

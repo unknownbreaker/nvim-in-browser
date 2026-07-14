@@ -20,8 +20,19 @@
 //
 // Browser + extension-load handling mirrors scripts/browser-smoke.mjs.
 //
-// Run: npm run build   (once)   then   node scripts/overlay-smoke.mjs
+// This smoke needs the test-only activation hook (nvim-activate-test, see
+// src/content/overlay.ts), which is stripped from production builds via
+// esbuild `define` dead-code elimination (scripts/build.mjs). So this script
+// builds its OWN test build (NVIM_TEST_HOOKS=1) before launching, and rebuilds
+// the real production dist/chromium afterwards (in a `finally`, so a failed
+// smoke still leaves a production build behind, not a test one). It also
+// proves the elimination actually works: it builds production first and
+// asserts the string "nvim-activate-test" is absent from the bundled
+// content.js.
+//
+// Run: node scripts/overlay-smoke.mjs   (builds everything itself)
 import puppeteer from "puppeteer-core";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -43,6 +54,39 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 function fail(msg) {
   console.error(`\nFAIL: ${msg}`);
   process.exit(1);
+}
+
+// Rebuild dist/chromium. `testHooks` selects whether the test-only activation
+// hook (nvim-activate-test) is compiled in; production always sets it "false"
+// unless the env var is set, so make sure it's absent here.
+function buildProd() {
+  const env = { ...process.env };
+  delete env.NVIM_TEST_HOOKS;
+  execFileSync("node", ["scripts/build.mjs"], { cwd: root, env, stdio: "inherit" });
+}
+
+function buildTestHooks() {
+  execFileSync("node", ["scripts/build.mjs"], {
+    cwd: root,
+    env: { ...process.env, NVIM_TEST_HOOKS: "1" },
+    stdio: "inherit",
+  });
+}
+
+// Prove the dead-code elimination actually works: production build must not
+// contain the test-only activation string anywhere in the bundled content
+// script, since a page can trigger it via postMessage if it's shipped.
+async function assertProdHasNoTestHook() {
+  console.log("building production dist/chromium (test hooks disabled) for dead-code check...");
+  buildProd();
+  const contentJs = await readFile(path.join(extDir, "content.js"), "utf8");
+  if (contentJs.includes("nvim-activate-test")) {
+    fail(
+      'production build (dist/chromium/content.js) contains "nvim-activate-test" — ' +
+        "esbuild dead-code elimination failed (check define __NVIM_TEST_HOOKS__ in scripts/build.mjs)",
+    );
+  }
+  console.log("ASSERT OK: production build has no test-activation hook string (dead-code eliminated)");
 }
 
 async function exists(p) {
@@ -322,39 +366,57 @@ async function run(exec, headless, id, baseUrl) {
 }
 
 async function main() {
-  if (!(await exists(path.join(extDir, "manifest.json")))) {
-    fail(`no build at ${extDir} — run \`npm run build\` first`);
-  }
-  const browser = await resolveBrowser();
-  if (!browser) {
-    fail(
-      "no Chromium found. Install Chrome for Testing: " +
-        "`npx @puppeteer/browsers install chrome@stable`, or set $NVIM_SMOKE_CHROME.",
+  // Prove dead-code elimination works before touching the test build at all.
+  await assertProdHasNoTestHook();
+
+  // Everything from here on runs against a TEST build (test-only activation
+  // hook compiled in). The `finally` below restores dist/chromium to a real
+  // production build no matter how this turns out (pass, fail, or throw).
+  try {
+    console.warn(
+      "WARNING: building with NVIM_TEST_HOOKS=1 for this smoke run — dist/chromium is now " +
+        "a TEST build (test-only activation hook enabled), not for production use.",
     );
-  }
-  const id = unpackedExtensionId(extDir);
-  const { server, baseUrl } = await startFixtureServer();
-  console.log(`browser: ${browser.label}`);
-  console.log(`extension id: ${id}`);
-  console.log(`fixture server: ${baseUrl}`);
+    buildTestHooks();
 
-  let result = await run(browser.exec, true, id, baseUrl);
-  if (!result.ok && result.reason === "no-extension") {
-    console.log("headless extension load failed; retrying headed (headless:false)...");
-    result = await run(browser.exec, false, id, baseUrl);
-  }
-  server.close();
+    if (!(await exists(path.join(extDir, "manifest.json")))) {
+      throw new Error(`no build at ${extDir} after test build`);
+    }
+    const browser = await resolveBrowser();
+    if (!browser) {
+      throw new Error(
+        "no Chromium found. Install Chrome for Testing: " +
+          "`npx @puppeteer/browsers install chrome@stable`, or set $NVIM_SMOKE_CHROME.",
+      );
+    }
+    const id = unpackedExtensionId(extDir);
+    const { server, baseUrl } = await startFixtureServer();
+    console.log(`browser: ${browser.label}`);
+    console.log(`extension id: ${id}`);
+    console.log(`fixture server: ${baseUrl}`);
 
-  if (!result.ok && result.reason === "no-extension") {
-    fail(
-      `extension did not load in ${browser.label}. If this is a managed/MDM Chrome ` +
-        "with developer mode disabled by policy, use Chrome for Testing instead.",
-    );
-  }
-  if (!result.ok) fail(result.reason);
+    let result = await run(browser.exec, true, id, baseUrl);
+    if (!result.ok && result.reason === "no-extension") {
+      console.log("headless extension load failed; retrying headed (headless:false)...");
+      result = await run(browser.exec, false, id, baseUrl);
+    }
+    server.close();
 
-  console.log("\nPASS: overlay activation, debounced sync, deactivate, input + password cases");
-  process.exit(0);
+    if (!result.ok && result.reason === "no-extension") {
+      throw new Error(
+        `extension did not load in ${browser.label}. If this is a managed/MDM Chrome ` +
+          "with developer mode disabled by policy, use Chrome for Testing instead.",
+      );
+    }
+    if (!result.ok) throw new Error(result.reason);
+
+    console.log("\nPASS: overlay activation, debounced sync, deactivate, input + password cases");
+  } finally {
+    console.log("restoring production dist/chromium (test hooks disabled)...");
+    buildProd();
+  }
 }
 
-main().catch((e) => fail(e instanceof Error ? (e.stack ?? e.message) : String(e)));
+main()
+  .then(() => process.exit(0))
+  .catch((e) => fail(e instanceof Error ? (e.stack ?? e.message) : String(e)));

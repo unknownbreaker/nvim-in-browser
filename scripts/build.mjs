@@ -8,6 +8,15 @@ const outDir = path.join(root, "dist", "chromium");
 
 const pkg = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 
+// Test-only activation hook (src/content/overlay.ts) must never ship in a
+// production build — it's page-triggerable since any page controls its own
+// DOM. `__NVIM_TEST_HOOKS__` is a compile-time flag: esbuild's `define`
+// replaces it with a literal, and the minifier dead-code-eliminates the
+// listener entirely when it's `false`. Only the smoke script (which sets
+// NVIM_TEST_HOOKS=1) opts in.
+const testHooksEnabled = process.env.NVIM_TEST_HOOKS === "1";
+const define = { __NVIM_TEST_HOOKS__: testHooksEnabled ? "true" : "false" };
+
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
 
@@ -23,6 +32,7 @@ await build({
   target: "chrome120",
   sourcemap: false,
   minify: true,
+  define,
 });
 
 // Content script: bundled as a classic IIFE (content scripts cannot be ESM).
@@ -34,6 +44,7 @@ await build({
   target: "chrome120",
   sourcemap: false,
   minify: true,
+  define,
 });
 
 await cp(path.join(root, "src", "scratch", "scratch.html"), path.join(outDir, "scratch.html"));
