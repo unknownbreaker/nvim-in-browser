@@ -14,7 +14,7 @@ await mkdir(outDir, { recursive: true });
 await build({
   entryPoints: [
     { in: path.join(root, "src", "background.ts"), out: "background" },
-    { in: path.join(root, "src", "scratch", "scratch.ts"), out: "scratch" },
+    { in: path.join(root, "src", "engine-frame", "engine-frame.ts"), out: "engine-frame" },
     { in: path.join(root, "src", "engine", "worker.ts"), out: "engine-worker" },
   ],
   outdir: outDir,
@@ -26,6 +26,10 @@ await build({
 });
 
 await cp(path.join(root, "src", "scratch", "scratch.html"), path.join(outDir, "scratch.html"));
+await cp(
+  path.join(root, "src", "engine-frame", "engine-frame.html"),
+  path.join(outDir, "engine-frame.html"),
+);
 
 // Copy the vendored Neovim engine assets alongside the worker bundle. These are
 // fetched (and pinned) by `npm run fetch-assets`; fail loudly if they're absent.

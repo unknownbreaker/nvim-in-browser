@@ -8,5 +8,20 @@
   },
   "action": {
     "default_title": "Open Neovim scratch page"
-  }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "engine-frame.html",
+        "engine-frame.js",
+        "engine-worker.js",
+        "nvim-asyncify.wasm",
+        "nvim-runtime.tar.gz"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }
