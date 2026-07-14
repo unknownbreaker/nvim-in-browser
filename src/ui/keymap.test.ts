@@ -34,4 +34,14 @@ describe("keyEventToNvim", () => {
     expect(isEscapeChord(chord)).toBe(true);
     expect(keyEventToNvim(chord)).toBeNull();
   });
+  it("keeps modifiers on <", () => {
+    expect(keyEventToNvim(ev("<", { ctrlKey: true }))).toBe("<C-lt>");
+    expect(keyEventToNvim(ev("<", { ctrlKey: true, shiftKey: true }))).toBe("<C-S-lt>");
+  });
+  it("covers additional pass-through cases", () => {
+    expect(keyEventToNvim(ev(" "))).toBe("<Space>");
+    expect(keyEventToNvim(ev("Tab", { shiftKey: true }))).toBe("<S-Tab>");
+    expect(keyEventToNvim(ev("Dead"))).toBeNull();
+    expect(keyEventToNvim(ev("a", { metaKey: true }))).toBe("<D-a>");
+  });
 });

@@ -35,8 +35,8 @@ export function keyEventToNvim(ev: KeyLike): string | null {
   const present = order.filter((m) => mods.includes(m));
   mods = present.join("");
 
-  const base = special ?? ev.key;
-  if (base === "<") return "<lt>";
-  if (!mods && isPrintable) return base;
+  let base = special ?? ev.key;
+  if (base === "<") base = "lt";
+  if (!mods && isPrintable && ev.key !== "<") return base;
   return `<${mods}${base}>`;
 }
