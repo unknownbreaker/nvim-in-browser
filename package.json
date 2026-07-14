@@ -1,6 +1,6 @@
 {
   "name": "nvim-in-browser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Real Neovim (WASM) editing in browser text fields and a scratch page — no local Neovim required",
   "type": "module",
