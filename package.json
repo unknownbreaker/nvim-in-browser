@@ -8,7 +8,7 @@
     "build": "node scripts/build.mjs",
     "fetch-assets": "node scripts/fetch-nvim-wasm.mjs",
     "test": "vitest run --passWithNoTests",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.worker.json"
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",

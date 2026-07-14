@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -15,6 +15,7 @@ await build({
   entryPoints: [
     { in: path.join(root, "src", "background.ts"), out: "background" },
     { in: path.join(root, "src", "scratch", "scratch.ts"), out: "scratch" },
+    { in: path.join(root, "src", "engine", "worker.ts"), out: "engine-worker" },
   ],
   outdir: outDir,
   bundle: true,
@@ -25,6 +26,21 @@ await build({
 });
 
 await cp(path.join(root, "src", "scratch", "scratch.html"), path.join(outDir, "scratch.html"));
+
+// Copy the vendored Neovim engine assets alongside the worker bundle. These are
+// fetched (and pinned) by `npm run fetch-assets`; fail loudly if they're absent.
+const vendorDir = path.join(root, "vendor", "nvim-wasm");
+for (const asset of ["nvim-asyncify.wasm", "nvim-runtime.tar.gz"]) {
+  const src = path.join(vendorDir, asset);
+  try {
+    await access(src);
+  } catch {
+    throw new Error(
+      `Missing vendored asset ${path.relative(root, src)}. Run \`npm run fetch-assets\` first.`,
+    );
+  }
+  await cp(src, path.join(outDir, asset));
+}
 
 // Stamp the package.json version into the shipped manifest; the source
 // manifest carries a 0.0.0 placeholder so version has one source of truth.
