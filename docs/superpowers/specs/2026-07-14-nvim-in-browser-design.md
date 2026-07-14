@@ -129,7 +129,12 @@ provider that RPCs to `navigator.clipboard`). Also serves as the graceful
 fallback for hostile pages.
 
 **Content-script overlay** — activates on explicit user hotkey on a focused
-eligible field, Asyncify build, positions a canvas overlay over the field.
+eligible field. The content script positions an **extension-origin iframe**
+(`engine-frame.html?mode=embed`, web-accessible) over the field — the Firenvim
+pattern. The engine, renderer, and keyboard capture all live inside that
+extension-origin iframe, which dodges host-page CSP for wasm/workers and gives
+clean key capture; the content script only positions the frame and relays text
+sync via `window.postMessage` (source-checked).
 
 ## Target fields
 
@@ -274,11 +279,17 @@ Layered, TDD throughout:
 0. **Scaffolding & release pipeline:** minimal loadable MV3 extension stub,
    `npm run build` → `dist/chromium/`, `scripts/release.sh` as above, remote
    wired, pipeline verified end-to-end with a v0.1.0 scaffold release.
+   ✅ **Done 2026-07-14** (v0.1.0 released).
 1. **Spike (de-risk):** nvim-wasm Asyncify build boots inside a minimal MV3
    extension and edits a buffer rendered on one textarea overlay. Hard gates:
    it works at all; idle CPU ≈ 0%. If the WASM build proves too immature, the
    fallback is CodeMirror 6 + vim emulation behind the same overlay chrome
    (degraded, swappable later) — decision point, not a silent switch.
+   ✅ **Done 2026-07-14** — real Neovim boots in Chrome, edits textareas and
+   text inputs via the overlay, live debounced sync + escape chord + boot
+   watchdog work; both hard gates met (browser-verified boot; idle steady
+   state ≈ 1 poll wakeup/s, gate ≤ 5/s enforced in the automated smoke).
+   See "Milestone 1 implementation notes" below for deviations from this spec.
 2. **Scratch page:** threaded build, persistent `~/scratch/`, clipboard bridge.
    Easiest surface; proves the engine end-to-end.
 3. **Textarea/input overlay:** activation hotkey, sync semantics, escape chord,
@@ -287,6 +298,47 @@ Layered, TDD throughout:
    fetch / folder upload), plugin fetcher, per-site filetype rules.
 5. **Hardening:** resource lifecycle, watchdog, safe mode, fidelity suite
    expansion, performance gates.
+
+## Milestone 1 implementation notes (2026-07-14)
+
+Reality checks from the spike — differences from the sections above that later
+milestones should treat as current truth:
+
+- **One build variant for now.** Only the Asyncify build is vendored and used
+  on BOTH surfaces (scratch page included). The threaded/SharedArrayBuffer
+  variant remains a Milestone 2+ optimization.
+- **Engine assets are fetched, not committed.** `npm run fetch-assets` pulls
+  `nvim-asyncify.wasm` + `nvim-runtime.tar.gz` (SHA-256-pinned) into gitignored
+  `vendor/`; the build copies them into `dist/chromium/`. Upstream nvim-wasm
+  has no license — see README; repo must stay private until resolved.
+- **Engine host layout:** core driver lives in `src/engine/nvim-host.ts`
+  (env-agnostic: WASI shims via @bjorn3/browser_wasi_shim, Asyncify driver,
+  stdio fds); `src/engine/worker.ts` is a thin postMessage shell
+  (`start/stdin` in; `ready/stdout/exit/fatal/stat` out — `stat` reports poll
+  wakeups/sec every 5s, the idle-CPU instrument). `src/engine/rpc.ts` does
+  msgpack-RPC framing; `src/engine/untar.ts` unpacks the runtime archive into
+  the in-memory WASI FS (no persistence yet — Milestone 4).
+- **Timer-latency caveat:** the vendored binary busy-polls stdin with ~1ms
+  clock-only poll subscriptions; the driver achieves idle ≈ 0% via adaptive
+  backoff (cap 1s). Consequence: when idle >250ms, nvim-internal timers
+  (`timeoutlen` mappings, CursorHold) can fire up to ~1s late. Input latency
+  is unaffected (stdin wakes the driver out-of-band, measured ~3ms). Tunable
+  constants in nvim-host.ts; a future event-driven upstream build removes the
+  need.
+- **IME composition is NOT yet implemented** (composition keydowns are ignored
+  via the "Process" key). Required before real long-form non-ASCII writing.
+- **Escape chord is double-guarded:** swallowed inside the frame AND at the
+  page's capture phase; the page side also deactivates, and a 20s boot
+  watchdog tears down the overlay if the engine never becomes ready.
+- **Verification tooling:** `scripts/smoke-nvim.mjs` (boots the real wasm in
+  Node, asserts RPC edit + idle wakeups), `scripts/browser-smoke.mjs` (scratch
+  page boot in headless Chrome), `scripts/overlay-smoke.mjs` (fixture-page
+  overlay: activation, live sync, synthetic input event, escape chord,
+  single-line input, password no-op, and asserts test hooks are dead-code in
+  production bundles). Test-only activation hooks compile out via esbuild
+  `define` unless `NVIM_TEST_HOOKS=1`. Note: on this machine system Chrome is
+  MDM-managed (unpacked extensions blocked); smokes use Chrome for Testing in
+  gitignored `./chrome` (`npx @puppeteer/browsers install chrome@stable`).
 
 ## Alternatives considered
 

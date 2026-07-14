@@ -5,6 +5,23 @@ standalone scratch page. No local Neovim install required.
 
 Design: [docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md](docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md)
 
+## Usage
+
+1. `npm ci`, `npm run fetch-assets`, `npm run build`
+2. `chrome://extensions` → Developer mode → **Load unpacked** → `dist/chromium/`
+3. **Scratch page:** click the toolbar button — full-page real Neovim.
+4. **Overlay:** focus any `<textarea>` or text-like `<input>` and press
+   `Ctrl+Shift+E`. Edits sync back live (debounced); `:q` or the escape chord
+   `Ctrl+Shift+Esc` closes the overlay (the chord always works, even if your
+   config wedges the editor).
+   Password fields are never touched.
+
+Verification: `npm test` (unit), `node scripts/smoke-nvim.mjs` (engine in
+Node), `node scripts/browser-smoke.mjs` and `node scripts/overlay-smoke.mjs`
+(real Chrome; needs Chrome for Testing via
+`npx @puppeteer/browsers install chrome@stable` if system Chrome is
+MDM-managed).
+
 ## Develop
 
 ```sh
