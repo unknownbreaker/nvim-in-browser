@@ -1,5 +1,7 @@
 node_modules/
 dist/
 memory/
+.superpowers/
+vendor/
 *.log
 .DS_Store

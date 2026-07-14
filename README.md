@@ -22,3 +22,11 @@ scripts/release.sh patch   # or minor | major | X.Y.Z; add --dry-run to test
 Builds, packages `nvim-in-browser-chromium.zip` + `nvim-in-browser-chromium-X.Y.Z.zip`,
 opens and merges a release PR, tags `vX.Y.Z`, and publishes a GitHub release
 with both zips attached.
+
+## Third-party engine
+
+The Neovim WASM binary and runtime archive are fetched at build time from
+[MuNeNICK/nvim-wasm](https://github.com/MuNeNICK/nvim-wasm), which currently
+has **no license**. Neovim itself is Apache-2.0. Do not make this repo or its
+release assets public until upstream licensing is resolved (tracked: open an
+issue upstream).

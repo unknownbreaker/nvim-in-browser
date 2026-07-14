@@ -6,11 +6,18 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "fetch-assets": "node scripts/fetch-nvim-wasm.mjs",
+    "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@bjorn3/browser_wasi_shim": "^0.4.2",
+    "@msgpack/msgpack": "^3.0.0"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.268",
     "esbuild": "^0.25.0",
-    "typescript": "^5.5.3"
+    "typescript": "^5.5.3",
+    "vitest": "^2.0.0"
   }
 }
