@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "nvim-in-browser",
+  "version": "0.0.0",
+  "description": "Real Neovim (WASM) editing in browser text fields and a scratch page — no local Neovim required",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open Neovim scratch page"
+  }
+}

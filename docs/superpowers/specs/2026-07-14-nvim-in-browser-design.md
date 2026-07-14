@@ -248,8 +248,32 @@ Layered, TDD throughout:
 - **Performance gates in CI:** idle CPU ≈ 0%; input-latency p95 budget on the
   Asyncify build; boot-time budget.
 
+## Build & Release
+
+- **Build output:** `npm run build` compiles `src/` into **`dist/chromium/`** — a
+  directory loadable directly via `chrome://extensions` → "Load unpacked".
+  `dist/` is gitignored. The version in `package.json` is the single source of
+  truth; the build stamps it into the output `manifest.json` (the source
+  manifest carries a `0.0.0` placeholder).
+- **Remote:** `git@github.com:unknownbreaker/nvim-in-browser.git`.
+- **Release pipeline:** a local script, `scripts/release.sh <patch|minor|major|X.Y.Z>`:
+  1. Preconditions: clean tree, on `main`, up to date with origin, `gh` authed.
+  2. Bump version in `package.json` (`npm version --no-git-tag-version`).
+  3. Build `dist/chromium/`, then package two zips with identical contents
+     (extension files at zip root): `nvim-in-browser-chromium.zip` and
+     `nvim-in-browser-chromium-X.Y.Z.zip`.
+  4. Commit the bump on branch `release/vX.Y.Z`, push, open a PR via `gh`.
+  5. Merge the PR (squash). If branch protection blocks the merge, stop and
+     leave the PR open.
+  6. Tag `vX.Y.Z` on merged `main`, push the tag, publish a GitHub release for
+     it with both zips attached as assets.
+  - Supports `--dry-run` (build + package, no git/GitHub side effects).
+
 ## Sequencing / milestones
 
+0. **Scaffolding & release pipeline:** minimal loadable MV3 extension stub,
+   `npm run build` → `dist/chromium/`, `scripts/release.sh` as above, remote
+   wired, pipeline verified end-to-end with a v0.1.0 scaffold release.
 1. **Spike (de-risk):** nvim-wasm Asyncify build boots inside a minimal MV3
    extension and edits a buffer rendered on one textarea overlay. Hard gates:
    it works at all; idle CPU ≈ 0%. If the WASM build proves too immature, the
