@@ -25,6 +25,17 @@ await build({
   minify: true,
 });
 
+// Content script: bundled as a classic IIFE (content scripts cannot be ESM).
+await build({
+  entryPoints: [{ in: path.join(root, "src", "content", "overlay.ts"), out: "content" }],
+  outdir: outDir,
+  bundle: true,
+  format: "iife",
+  target: "chrome120",
+  sourcemap: false,
+  minify: true,
+});
+
 await cp(path.join(root, "src", "scratch", "scratch.html"), path.join(outDir, "scratch.html"));
 await cp(
   path.join(root, "src", "engine-frame", "engine-frame.html"),

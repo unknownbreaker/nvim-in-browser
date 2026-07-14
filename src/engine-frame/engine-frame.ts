@@ -88,9 +88,12 @@ async function init(seedText: unknown): Promise<void> {
   if (typeof seedText === "string" && seedText.length > 0) {
     await client.request("nvim_buf_set_lines", [0, 0, -1, false, seedText.split("\n")]);
   }
-  // Push buffer edits to the page over the embed RPC channel (channel 1).
+  // Push buffer edits to the page over our RPC channel. Query the channel id
+  // from nvim rather than assuming the embed channel is always 1.
+  const apiInfo = (await client.request("nvim_get_api_info", [])) as unknown[];
+  const channel = typeof apiInfo[0] === "number" ? apiInfo[0] : 1;
   await client.request("nvim_exec2", [
-    "autocmd TextChanged,TextChangedI * call rpcnotify(1, 'wasm_text_changed')",
+    `autocmd TextChanged,TextChangedI * call rpcnotify(${channel}, 'wasm_text_changed')`,
     {},
   ]);
   parent.postMessage({ type: "nvim-ready" }, "*");

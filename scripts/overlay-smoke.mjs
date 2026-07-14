@@ -1,0 +1,360 @@
+// Overlay browser smoke: boots the built extension in a real Chromium, serves
+// the test-pages/ fixture over a loopback HTTP server (content scripts need a
+// real origin — file:// requires "Allow access to file URLs", which cannot be
+// toggled programmatically), then drives the full Task 7 activation loop and
+// asserts each stage programmatically. No human is watching, so every expected
+// behaviour from the brief's manual Step 5 is a hard assertion here.
+//
+// Asserted:
+//   1. Activation overlays the extension engine-frame iframe over the textarea,
+//      positioned over the field.
+//   2. Keys typed into nvim reach the buffer.
+//   3. CRITICAL: a mid-session edit syncs back to textarea.value via the
+//      debounced `nvim-text` message (>300ms) — NOT only on deactivate.
+//   4. The synthetic input event fires (fixture's window.__inputEvents rises),
+//      proving the React/Vue-controlled-component write path works.
+//   5. The escape chord deactivates: final text syncs, iframe is removed, and
+//      focus returns to the underlying field.
+//   6. Single-line input: overlay honours the min-height strip; edit syncs.
+//   7. Password input: activation is a no-op (no overlay, value untouched).
+//
+// Browser + extension-load handling mirrors scripts/browser-smoke.mjs.
+//
+// Run: npm run build   (once)   then   node scripts/overlay-smoke.mjs
+import puppeteer from "puppeteer-core";
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
+import path from "node:path";
+
+const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const extDir = path.join(root, "dist", "chromium");
+const pagesDir = path.join(root, "test-pages");
+const SYSTEM_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+
+const shotPath = path.join(root, ".superpowers", "sdd", "task-7-overlay.png");
+const BOOT_TIMEOUT_MS = 60_000; // first boot compiles ~8MB wasm
+const SYNC_WAIT_MS = 900; // > 300ms debounce + slack
+const MIN_STRIP_H = 220;
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function fail(msg) {
+  console.error(`\nFAIL: ${msg}`);
+  process.exit(1);
+}
+
+async function exists(p) {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function findChromeForTesting() {
+  const base = path.join(root, "chrome");
+  if (!(await exists(base))) return null;
+  const results = [];
+  async function walk(dir, depth) {
+    if (depth > 6) return;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) await walk(full, depth + 1);
+      else if (
+        e.name === "Google Chrome for Testing" ||
+        e.name === "chrome" ||
+        e.name === "chrome.exe"
+      )
+        results.push(full);
+    }
+  }
+  await walk(base, 0);
+  return results[0] ?? null;
+}
+
+async function resolveBrowser() {
+  const env = process.env.NVIM_SMOKE_CHROME;
+  if (env) return { exec: env, label: `env NVIM_SMOKE_CHROME` };
+  const cft = await findChromeForTesting();
+  if (cft) return { exec: cft, label: "Chrome for Testing (./chrome)" };
+  if (await exists(SYSTEM_CHROME)) return { exec: SYSTEM_CHROME, label: "system Google Chrome" };
+  return null;
+}
+
+function unpackedExtensionId(dir) {
+  const hex = createHash("sha256").update(dir).digest("hex").slice(0, 32);
+  let id = "";
+  for (const ch of hex) id += String.fromCharCode(97 + parseInt(ch, 16));
+  return id;
+}
+
+async function launch(exec, headless) {
+  const defaults = await puppeteer.defaultArgs();
+  const defaultDisable = defaults.find((a) => a.startsWith("--disable-features="));
+  const feats = defaultDisable ? defaultDisable.slice("--disable-features=".length) : "";
+  const mergedDisable = `--disable-features=${feats ? feats + "," : ""}DisableLoadExtensionCommandLineSwitch`;
+  return puppeteer.launch({
+    executablePath: exec,
+    headless,
+    ignoreDefaultArgs: ["--disable-extensions", defaultDisable].filter(Boolean),
+    args: [
+      `--disable-extensions-except=${extDir}`,
+      `--load-extension=${extDir}`,
+      mergedDisable,
+      "--no-first-run",
+      "--no-default-browser-check",
+    ],
+  });
+}
+
+async function extensionLoaded(browser, id) {
+  const swTarget = await browser
+    .waitForTarget(
+      (t) => t.type() === "service_worker" && t.url().startsWith(`chrome-extension://${id}/`),
+      { timeout: 8_000 },
+    )
+    .catch(() => null);
+  return Boolean(swTarget);
+}
+
+// Minimal static server for the fixture directory on a random loopback port.
+function startFixtureServer() {
+  return new Promise((resolve) => {
+    const server = createServer(async (req, res) => {
+      const rel = decodeURIComponent((req.url ?? "/").split("?")[0]);
+      const file = path.join(pagesDir, rel === "/" ? "textarea.html" : rel.replace(/^\/+/, ""));
+      if (!file.startsWith(pagesDir)) {
+        res.writeHead(403).end("forbidden");
+        return;
+      }
+      try {
+        const body = await readFile(file);
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(body);
+      } catch {
+        res.writeHead(404).end("not found");
+      }
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      resolve({ server, baseUrl: `http://127.0.0.1:${port}` });
+    });
+  });
+}
+
+// Activate the overlay via the test-only postMessage hook: stamp the opt-in
+// attribute, focus the field, then post the activation message. Waits for the
+// freshly-attached extension frame to boot (__nvim.ready).
+async function activateOn(page, fieldId) {
+  await page.evaluate((id) => {
+    document.documentElement.dataset.nvimTestHook = "1";
+    document.getElementById(id).focus();
+    window.postMessage({ type: "nvim-activate-test" }, "*");
+  }, fieldId);
+  const frame = await page.waitForFrame((f) => f.url().includes("engine-frame.html"), {
+    timeout: 15_000,
+  });
+  await frame.waitForFunction("window.__nvim && window.__nvim.ready === true", {
+    timeout: BOOT_TIMEOUT_MS,
+    polling: 250,
+  });
+  return frame;
+}
+
+// Dispatch the Ctrl+Shift+Esc chord inside the engine frame (the frame owns the
+// deactivate path; it pulls final buffer text and posts nvim-deactivate).
+async function sendEscapeChord(frame) {
+  await frame.evaluate(() => {
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        ctrlKey: true,
+        shiftKey: true,
+        bubbles: true,
+      }),
+    );
+  });
+}
+
+function overlayRectInfo(page) {
+  return page.evaluate((fieldId) => {
+    const frame = document.querySelector('iframe[src*="engine-frame.html"]');
+    const field = document.getElementById(fieldId);
+    if (!frame || !field) return null;
+    const f = frame.getBoundingClientRect();
+    const t = field.getBoundingClientRect();
+    return { fLeft: f.left, fTop: f.top, fHeight: f.height, tLeft: t.left, tTop: t.top };
+  }, page.__fieldId);
+}
+
+async function run(exec, headless, id, baseUrl) {
+  const browser = await launch(exec, headless);
+  try {
+    if (!(await extensionLoaded(browser, id))) {
+      await browser.close();
+      return { ok: false, reason: "no-extension" };
+    }
+    const page = await browser.newPage();
+    page.on("pageerror", (err) => console.log(`  [pageerror] ${err.message}`));
+    page.on("console", (msg) => {
+      const t = msg.text();
+      if (/error|fail|Uncaught/i.test(t)) console.log(`  [console] ${t}`);
+    });
+
+    await page.goto(`${baseUrl}/textarea.html`, { waitUntil: "load" });
+    // Give the document_idle content script a moment to register listeners.
+    await wait(400);
+
+    // ---- Case 1: textarea, mid-session debounced sync + deactivate ----
+    console.log("[textarea] activating...");
+    let frame = await activateOn(page, "ta");
+    page.__fieldId = "ta";
+
+    const pos = await overlayRectInfo(page);
+    if (!pos) return { ok: false, reason: "no overlay iframe after textarea activation" };
+    console.log(`[textarea] overlay rect ${JSON.stringify(pos)}`);
+    if (Math.abs(pos.fLeft - pos.tLeft) > 6 || Math.abs(pos.fTop - pos.tTop) > 6) {
+      return { ok: false, reason: `overlay not positioned over textarea: ${JSON.stringify(pos)}` };
+    }
+    console.log("[textarea] ASSERT OK: overlay positioned over field");
+
+    await mkdir(path.dirname(shotPath), { recursive: true });
+    await page.screenshot({ path: shotPath });
+    console.log(`[textarea] screenshot -> ${shotPath}`);
+
+    // Edit: ciw on first word -> "slow", back to normal mode.
+    await frame.evaluate(() => window.__nvim.input("ciwslow"));
+    await frame.evaluate(() => window.__nvim.input("<Esc>"));
+    const buf = await frame.evaluate(() => window.__nvim.getBufferText());
+    console.log(`[textarea] nvim buffer -> ${JSON.stringify(buf)}`);
+    if (!buf.includes("slow quick brown fox")) {
+      return { ok: false, reason: `keys did not reach nvim: ${JSON.stringify(buf)}` };
+    }
+
+    // CRITICAL: debounced nvim-text sync must land in the field BEFORE deactivate.
+    await wait(SYNC_WAIT_MS);
+    const midValue = await page.evaluate(() => document.getElementById("ta").value);
+    const inputEvents = await page.evaluate(() => window.__inputEvents);
+    console.log(`[textarea] mid-session textarea.value -> ${JSON.stringify(midValue)}`);
+    console.log(`[textarea] window.__inputEvents -> ${inputEvents}`);
+    if (midValue !== "slow quick brown fox.") {
+      return {
+        ok: false,
+        reason: `CRITICAL: debounced sync did not update textarea.value: ${JSON.stringify(midValue)}`,
+      };
+    }
+    if (!(inputEvents > 0)) {
+      return { ok: false, reason: "synthetic input event never fired (controlled-path broken)" };
+    }
+    console.log("[textarea] ASSERT OK: debounced sync + synthetic input event");
+
+    // Deactivate via escape chord; assert final sync, removal, focus restore.
+    await sendEscapeChord(frame);
+    await wait(600);
+    const afterDeact = await page.evaluate(() => {
+      const frameGone = !document.querySelector('iframe[src*="engine-frame.html"]');
+      return {
+        frameGone,
+        value: document.getElementById("ta").value,
+        focusedId: document.activeElement?.id ?? null,
+      };
+    });
+    console.log(`[textarea] after deactivate -> ${JSON.stringify(afterDeact)}`);
+    if (!afterDeact.frameGone) return { ok: false, reason: "overlay iframe not removed on deactivate" };
+    if (afterDeact.value !== "slow quick brown fox.")
+      return { ok: false, reason: `final sync wrong: ${JSON.stringify(afterDeact.value)}` };
+    if (afterDeact.focusedId !== "ta")
+      return { ok: false, reason: `focus not restored to textarea: ${afterDeact.focusedId}` };
+    console.log("[textarea] ASSERT OK: final sync + iframe removed + focus restored");
+
+    // ---- Case 2: single-line input, min-height strip + sync ----
+    console.log("[input] activating...");
+    frame = await activateOn(page, "q");
+    page.__fieldId = "q";
+    const inputPos = await overlayRectInfo(page);
+    console.log(`[input] overlay rect ${JSON.stringify(inputPos)}`);
+    if (!inputPos || inputPos.fHeight < MIN_STRIP_H) {
+      return { ok: false, reason: `min-height strip not honoured: ${JSON.stringify(inputPos)}` };
+    }
+    console.log(`[input] ASSERT OK: overlay height ${inputPos.fHeight} >= ${MIN_STRIP_H}`);
+
+    await frame.evaluate(() => window.__nvim.input("A-edited"));
+    await frame.evaluate(() => window.__nvim.input("<Esc>"));
+    await sendEscapeChord(frame);
+    await wait(600);
+    const inputValue = await page.evaluate(() => document.getElementById("q").value);
+    console.log(`[input] value after deactivate -> ${JSON.stringify(inputValue)}`);
+    if (inputValue !== "single line-edited")
+      return { ok: false, reason: `input did not sync: ${JSON.stringify(inputValue)}` };
+    console.log("[input] ASSERT OK: single-line value synced");
+
+    // ---- Case 3: password input -> activation is a no-op ----
+    console.log("[password] attempting activation (expected no-op)...");
+    await page.evaluate(() => {
+      document.getElementById("pw").focus();
+      window.postMessage({ type: "nvim-activate-test" }, "*");
+    });
+    await wait(800);
+    const pw = await page.evaluate(() => ({
+      overlay: Boolean(document.querySelector('iframe[src*="engine-frame.html"]')),
+      value: document.getElementById("pw").value,
+    }));
+    console.log(`[password] state -> ${JSON.stringify(pw)}`);
+    if (pw.overlay) return { ok: false, reason: "password field should not get an overlay" };
+    if (pw.value !== "never-touch-me")
+      return { ok: false, reason: `password value mutated: ${JSON.stringify(pw.value)}` };
+    console.log("[password] ASSERT OK: activation is a no-op");
+
+    await browser.close();
+    return { ok: true };
+  } catch (e) {
+    await browser.close().catch(() => {});
+    return { ok: false, reason: e instanceof Error ? (e.stack ?? e.message) : String(e) };
+  }
+}
+
+async function main() {
+  if (!(await exists(path.join(extDir, "manifest.json")))) {
+    fail(`no build at ${extDir} — run \`npm run build\` first`);
+  }
+  const browser = await resolveBrowser();
+  if (!browser) {
+    fail(
+      "no Chromium found. Install Chrome for Testing: " +
+        "`npx @puppeteer/browsers install chrome@stable`, or set $NVIM_SMOKE_CHROME.",
+    );
+  }
+  const id = unpackedExtensionId(extDir);
+  const { server, baseUrl } = await startFixtureServer();
+  console.log(`browser: ${browser.label}`);
+  console.log(`extension id: ${id}`);
+  console.log(`fixture server: ${baseUrl}`);
+
+  let result = await run(browser.exec, true, id, baseUrl);
+  if (!result.ok && result.reason === "no-extension") {
+    console.log("headless extension load failed; retrying headed (headless:false)...");
+    result = await run(browser.exec, false, id, baseUrl);
+  }
+  server.close();
+
+  if (!result.ok && result.reason === "no-extension") {
+    fail(
+      `extension did not load in ${browser.label}. If this is a managed/MDM Chrome ` +
+        "with developer mode disabled by policy, use Chrome for Testing instead.",
+    );
+  }
+  if (!result.ok) fail(result.reason);
+
+  console.log("\nPASS: overlay activation, debounced sync, deactivate, input + password cases");
+  process.exit(0);
+}
+
+main().catch((e) => fail(e instanceof Error ? (e.stack ?? e.message) : String(e)));

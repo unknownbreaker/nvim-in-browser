@@ -9,6 +9,19 @@
   "action": {
     "default_title": "Open Neovim scratch page"
   },
+  "commands": {
+    "activate-nvim": {
+      "suggested_key": { "default": "Ctrl+Shift+E", "mac": "MacCtrl+Shift+E" },
+      "description": "Activate Neovim on the focused text field"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
