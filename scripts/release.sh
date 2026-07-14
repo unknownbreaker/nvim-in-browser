@@ -42,7 +42,7 @@ for cmd in git gh node npm zip; do
 done
 
 if [[ "$DRY_RUN" == false ]]; then
-  gh auth status >/dev/null 2>&1 || die "gh is not authenticated (run: gh auth login)"
+  gh auth status --hostname github.com >/dev/null 2>&1 || die "gh is not authenticated for github.com (run: gh auth login)"
   [[ "$(git rev-parse --abbrev-ref HEAD)" == "main" ]] || die "must be on main"
   [[ -z "$(git status --porcelain)" ]] || die "working tree is not clean"
   git fetch origin main
