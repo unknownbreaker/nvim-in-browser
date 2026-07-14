@@ -13,6 +13,10 @@ import { NvimRpc } from "./rpc";
 export class NvimClient {
   onRedraw: (batch: unknown[]) => void = () => {};
   onExit: (code: number) => void = () => {};
+  // Fired for a worker fatal that arrives AFTER start() has resolved. A pre-ready
+  // fatal still rejects the start() promise; this covers the post-ready case,
+  // where rejecting a settled promise would be a silent no-op.
+  onFatal: (message: string) => void = () => {};
   onStat: (wps: number) => void = () => {};
   // Pass-through for non-redraw notifications (e.g. custom rpcnotify events like
   // `wasm_text_changed`). Redraw batches go to onRedraw and never reach here.
@@ -39,18 +43,34 @@ export class NvimClient {
 
   start(cols: number, rows: number): Promise<void> {
     return new Promise((resolve, reject) => {
+      let settled = false;
       this.worker.onmessage = (ev: MessageEvent) => {
         const m = ev.data;
         if (m.type === "ready") {
           void this.rpc
             .request("nvim_ui_attach", [cols, rows, { rgb: true, ext_linegrid: true }])
-            .then(() => resolve(), reject);
+            .then(
+              () => {
+                settled = true;
+                resolve();
+              },
+              (err) => {
+                settled = true;
+                reject(err);
+              },
+            );
         } else if (m.type === "stdout") {
           this.rpc.feed(m.chunk);
         } else if (m.type === "exit") {
           this.onExit(m.code);
         } else if (m.type === "fatal") {
-          reject(new Error(m.message));
+          // Pre-ready: reject the start() promise. Post-ready: the promise is
+          // already settled, so route to onFatal instead of no-op rejecting.
+          if (settled) this.onFatal(m.message);
+          else {
+            settled = true;
+            reject(new Error(m.message));
+          }
         } else if (m.type === "stat") {
           this.onStat(m.wakeupsPerSecond);
         }

@@ -128,6 +128,17 @@ async function main() {
 
   if (exited !== null) fail(`nvim exited unexpectedly during idle (code ${exited})`);
 
+  // Hard assert the idle-CPU gate: a healthy backed-off nvim parks on
+  // poll_oneoff and wakes only a handful of times per second. Prefer the final
+  // 5s stat sample; fall back to the measured average if the idle window was
+  // too short to emit one.
+  const IDLE_WAKEUP_LIMIT = 5;
+  const finalSample = statSamples.length > 0 ? statSamples[statSamples.length - 1] : perSecond;
+  if (finalSample > IDLE_WAKEUP_LIMIT) {
+    fail(`idle wake-ups too high: final sample ${finalSample.toFixed(2)}/s > ${IDLE_WAKEUP_LIMIT}/s`);
+  }
+  console.log(`ASSERT OK: idle wake-ups ${finalSample.toFixed(2)}/s <= ${IDLE_WAKEUP_LIMIT}/s`);
+
   // 4. Responsiveness after idle: typing must still work promptly once nvim has
   // been sitting in the backed-off idle state (guards the idle optimization).
   const t0 = Date.now();

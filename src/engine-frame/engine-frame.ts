@@ -33,12 +33,23 @@ const debug = {
 };
 (window as unknown as { __nvim: typeof debug }).__nvim = debug;
 
+// Final buffer text carried out-of-band by the VimLeavePre autocmd (see
+// init()). `:q`/`:wq` can fire after the last debounce flush, so onExit/onFatal
+// relay this cached snapshot rather than losing edits since the last sync.
+let cachedFinalText: string | null = null;
+
 client.onRedraw = (batch) => renderer.apply(batch);
 client.onStat = (wps) => {
   debug.wakeupsPerSecond = wps;
   console.log(`[nvim] poll wakeups/sec: ${wps}`);
 };
-client.onExit = () => parent.postMessage({ type: "nvim-deactivate", text: null }, "*");
+// Engine gone (clean exit or post-boot fatal): post the last known text. On
+// null the parent keeps the field's last synced value, so this never regresses.
+const postDeactivateFinal = (): void => {
+  parent.postMessage({ type: "nvim-deactivate", text: cachedFinalText }, "*");
+};
+client.onExit = postDeactivateFinal;
+client.onFatal = postDeactivateFinal;
 
 const { cols, rows } = renderer.gridForSize(innerWidth, innerHeight);
 
@@ -65,7 +76,13 @@ async function currentText(): Promise<string> {
 }
 
 async function deactivate(): Promise<void> {
-  const text = await currentText();
+  // Race the buffer pull against a timeout: if the engine is dead or hung after
+  // boot, fall back to the last known text instead of wedging the escape chord
+  // forever. The parent still has the last synced value as a floor.
+  const timeout = new Promise<string | null>((resolve) =>
+    setTimeout(() => resolve(cachedFinalText), 500),
+  );
+  const text = await Promise.race([currentText(), timeout]);
   parent.postMessage({ type: "nvim-deactivate", text }, "*");
 }
 
@@ -73,7 +90,13 @@ async function deactivate(): Promise<void> {
 // (see the autocmd installed in init()). Debounce buffer pulls so a burst of
 // keystrokes yields a single nvim_buf_get_lines + postMessage.
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
-client.onEvent = (method) => {
+client.onEvent = (method, args) => {
+  if (method === "wasm_text_final") {
+    // VimLeavePre payload: the whole buffer joined by "\n". Cache it so
+    // onExit/onFatal can relay it even if no debounce flush has run.
+    if (typeof args[0] === "string") cachedFinalText = args[0];
+    return;
+  }
   if (method !== "wasm_text_changed") return;
   if (syncTimer !== null) clearTimeout(syncTimer);
   syncTimer = setTimeout(() => {
@@ -93,7 +116,10 @@ async function init(seedText: unknown): Promise<void> {
   const apiInfo = (await client.request("nvim_get_api_info", [])) as unknown[];
   const channel = typeof apiInfo[0] === "number" ? apiInfo[0] : 1;
   await client.request("nvim_exec2", [
-    `autocmd TextChanged,TextChangedI * call rpcnotify(${channel}, 'wasm_text_changed')`,
+    [
+      `autocmd TextChanged,TextChangedI * call rpcnotify(${channel}, 'wasm_text_changed')`,
+      `autocmd VimLeavePre * call rpcnotify(${channel}, 'wasm_text_final', join(getline(1,'$'),"\\n"))`,
+    ].join("\n"),
     {},
   ]);
   parent.postMessage({ type: "nvim-ready" }, "*");

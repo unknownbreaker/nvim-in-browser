@@ -17,6 +17,9 @@
 //      focus returns to the underlying field.
 //   6. Single-line input: overlay honours the min-height strip; edit syncs.
 //   7. Password input: activation is a no-op (no overlay, value untouched).
+//   8. `:q` final-sync: fresh text typed then quit within the debounce window
+//      still reaches the field, proving the VimLeavePre final sync (not a
+//      surviving debounce — the frame is torn down before it could fire).
 //
 // Browser + extension-load handling mirrors scripts/browser-smoke.mjs.
 //
@@ -356,6 +359,32 @@ async function run(exec, headless, id, baseUrl) {
     if (pw.value !== "never-touch-me")
       return { ok: false, reason: `password value mutated: ${JSON.stringify(pw.value)}` };
     console.log("[password] ASSERT OK: activation is a no-op");
+
+    // ---- Case 4: `:q` final-syncs via VimLeavePre (not the debounce) ----
+    // Re-activate the textarea, type fresh text, then quit in the SAME input
+    // feed — far under the 300ms debounce. VimLeavePre carries the final buffer
+    // out on exit; the frame (and its pending debounce timer) is torn down
+    // immediately, so the only way the fresh text can reach the field is the
+    // final sync. (We force-quit with `:q!`: the buffer is modified, so a bare
+    // `:q` would E37; VimLeavePre fires identically on any quit.)
+    console.log("[quit] re-activating textarea for :q final-sync test...");
+    frame = await activateOn(page, "ta");
+    page.__fieldId = "ta";
+    await frame.evaluate(() => window.__nvim.input("Gofresh-quit-marker<Esc>:q!<CR>"));
+    await wait(600);
+    const quitState = await page.evaluate(() => ({
+      frameGone: !document.querySelector('iframe[src*="engine-frame.html"]'),
+      value: document.getElementById("ta").value,
+    }));
+    console.log(`[quit] after :q -> ${JSON.stringify(quitState)}`);
+    if (!quitState.frameGone)
+      return { ok: false, reason: ":q did not quit nvim — overlay iframe still present" };
+    if (!quitState.value.includes("fresh-quit-marker"))
+      return {
+        ok: false,
+        reason: `:q lost edits since last debounce — VimLeavePre final sync missing: ${JSON.stringify(quitState.value)}`,
+      };
+    console.log("[quit] ASSERT OK: :q final-synced fresh text via VimLeavePre");
 
     await browser.close();
     return { ok: true };
