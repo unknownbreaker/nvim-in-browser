@@ -6,10 +6,12 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["chrome"],
     "strict": true,
+    "skipLibCheck": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "scripts/**/*.mjs"]
+  "include": ["src/**/*.ts", "scripts/**/*.mjs"],
+  "exclude": ["src/engine/worker.ts"]
 }

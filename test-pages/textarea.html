@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>overlay fixture</title>
+  </head>
+  <body>
+    <h1>overlay fixture</h1>
+    <textarea id="ta" rows="8" cols="60">The quick brown fox.</textarea>
+    <form onsubmit="document.title = 'SUBMITTED:' + this.q.value; return false">
+      <input id="q" name="q" type="text" value="single line" />
+      <button>submit</button>
+    </form>
+    <input id="pw" type="password" value="never-touch-me" />
+    <script>
+      // Proxy for a framework-controlled component: count native input events so
+      // the smoke can prove setNativeValue()'s synthetic dispatch was seen.
+      window.__inputEvents = 0;
+      for (const el of document.querySelectorAll("textarea, input")) {
+        el.addEventListener("input", () => {
+          window.__inputEvents++;
+        });
+      }
+    </script>
+  </body>
+</html>

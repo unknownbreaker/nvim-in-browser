@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -8,13 +8,23 @@ const outDir = path.join(root, "dist", "chromium");
 
 const pkg = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 
+// Test-only activation hook (src/content/overlay.ts) must never ship in a
+// production build — it's page-triggerable since any page controls its own
+// DOM. `__NVIM_TEST_HOOKS__` is a compile-time flag: esbuild's `define`
+// replaces it with a literal, and the minifier dead-code-eliminates the
+// listener entirely when it's `false`. Only the smoke script (which sets
+// NVIM_TEST_HOOKS=1) opts in.
+const testHooksEnabled = process.env.NVIM_TEST_HOOKS === "1";
+const define = { __NVIM_TEST_HOOKS__: testHooksEnabled ? "true" : "false" };
+
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
 
 await build({
   entryPoints: [
     { in: path.join(root, "src", "background.ts"), out: "background" },
-    { in: path.join(root, "src", "scratch", "scratch.ts"), out: "scratch" },
+    { in: path.join(root, "src", "engine-frame", "engine-frame.ts"), out: "engine-frame" },
+    { in: path.join(root, "src", "engine", "worker.ts"), out: "engine-worker" },
   ],
   outdir: outDir,
   bundle: true,
@@ -22,9 +32,41 @@ await build({
   target: "chrome120",
   sourcemap: false,
   minify: true,
+  define,
+});
+
+// Content script: bundled as a classic IIFE (content scripts cannot be ESM).
+await build({
+  entryPoints: [{ in: path.join(root, "src", "content", "overlay.ts"), out: "content" }],
+  outdir: outDir,
+  bundle: true,
+  format: "iife",
+  target: "chrome120",
+  sourcemap: false,
+  minify: true,
+  define,
 });
 
 await cp(path.join(root, "src", "scratch", "scratch.html"), path.join(outDir, "scratch.html"));
+await cp(
+  path.join(root, "src", "engine-frame", "engine-frame.html"),
+  path.join(outDir, "engine-frame.html"),
+);
+
+// Copy the vendored Neovim engine assets alongside the worker bundle. These are
+// fetched (and pinned) by `npm run fetch-assets`; fail loudly if they're absent.
+const vendorDir = path.join(root, "vendor", "nvim-wasm");
+for (const asset of ["nvim-asyncify.wasm", "nvim-runtime.tar.gz"]) {
+  const src = path.join(vendorDir, asset);
+  try {
+    await access(src);
+  } catch {
+    throw new Error(
+      `Missing vendored asset ${path.relative(root, src)}. Run \`npm run fetch-assets\` first.`,
+    );
+  }
+  await cp(src, path.join(outDir, asset));
+}
 
 // Stamp the package.json version into the shipped manifest; the source
 // manifest carries a 0.0.0 placeholder so version has one source of truth.

@@ -6,11 +6,20 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "typecheck": "tsc --noEmit"
+    "fetch-assets": "node scripts/fetch-nvim-wasm.mjs",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.worker.json"
+  },
+  "dependencies": {
+    "@bjorn3/browser_wasi_shim": "^0.4.2",
+    "@msgpack/msgpack": "^3.0.0"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.268",
+    "@types/node": "^26.1.1",
     "esbuild": "^0.25.0",
-    "typescript": "^5.5.3"
+    "puppeteer-core": "^25.3.0",
+    "typescript": "^5.5.3",
+    "vitest": "^2.0.0"
   }
 }

@@ -41,6 +41,12 @@ for cmd in git gh node npm zip; do
   command -v "$cmd" >/dev/null 2>&1 || die "missing required command: $cmd"
 done
 
+# The built dist embeds the unlicensed nvim-wasm engine binaries, so any release
+# would attach them. Refuse to run unless explicitly overridden.
+if [[ "${ALLOW_UNLICENSED_ENGINE:-}" != "1" ]]; then
+  die "dist embeds nvim-wasm engine assets with no upstream license (see README 'Third-party engine'); repo+releases must stay private. Set ALLOW_UNLICENSED_ENGINE=1 to proceed."
+fi
+
 if [[ "$DRY_RUN" == false ]]; then
   gh auth status --hostname github.com >/dev/null 2>&1 || die "gh is not authenticated for github.com (run: gh auth login)"
   [[ "$(git rev-parse --abbrev-ref HEAD)" == "main" ]] || die "must be on main"
