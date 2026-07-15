@@ -7,7 +7,8 @@ Design: [docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md](docs/super
 
 ## Usage
 
-1. `npm ci`, `npm run build` (see "Engine" below for building the engine itself)
+1. `npm ci`, `npm run fetch-assets` (pulls the pinned engine — see "Engine"
+   below), then `npm run build`
 2. `chrome://extensions` → Developer mode → **Load unpacked** → `dist/chromium/`
 3. **Scratch page:** click the toolbar button — full-page real Neovim.
 4. **Overlay:** focus any `<textarea>` or text-like `<input>` and press
@@ -26,16 +27,14 @@ MDM-managed).
 
 ```sh
 npm ci
+npm run fetch-assets # -> vendor/nvim-wasi (pinned engine; needs gh auth)
 npm run build        # -> dist/chromium (load via chrome://extensions -> Load unpacked)
 npm run typecheck
 ```
 
-The default engine is the local clean-room build in `nvim-wasm-prototype/dist/`
-(built by the prototype pipeline). Set `NVIM_ENGINE=vendored npm run build` to
-bundle the legacy fetched engine from `vendor/nvim-wasm/` instead (run
-`npm run fetch-assets` first). Each build stamps `dist/chromium/engine-info.json`
-recording which engine (`cleanroom` or `vendored`) landed and its file
-byte sizes + SHA-256s.
+Each build copies the fetched engine into `dist/chromium/` and stamps
+`dist/chromium/engine-info.json` recording the source (`nvim-wasi`), the pinned
+release tag, and each file's byte size + SHA-256.
 
 ## Release
 
@@ -49,20 +48,24 @@ with both zips attached.
 
 ## Engine
 
-By default the extension ships a first-party, clean-room WASM build of
-Neovim from [`nvim-wasm-prototype/`](nvim-wasm-prototype/) (see its README
-and `STATUS.md`), built locally: `cd nvim-wasm-prototype && bash
-scripts/fetch-toolchain.sh && bash scripts/fetch-sources.sh && bash
-scripts/build-deps.sh && bash scripts/build-nvim.sh && bash
-scripts/asyncify.sh && bash scripts/package-runtime.sh` (each step is
-idempotent/resumable; produces `dist/nvim-asyncify.wasm` +
-`dist/nvim-runtime.tar.gz`). `npm run build` here then picks it up
-automatically. It carries no third-party license encumbrance.
+The Neovim-to-WebAssembly engine is **not** built in this repo. It lives in a
+separate project, [`nvim-wasi`](https://github.com/unknownbreaker/nvim-wasi),
+which builds it clean-room and publishes SHA-pinned release artifacts
+(`nvim-asyncify.wasm` + `nvim-runtime.tar.gz`). This extension consumes a
+pinned release as its sole engine source.
 
-The old vendored `nvim-wasm` engine is still available as a legacy fallback:
-`npm run fetch-assets` (pulls from
-[MuNeNICK/nvim-wasm](https://github.com/MuNeNICK/nvim-wasm)) then
-`NVIM_ENGINE=vendored npm run build`. That upstream currently has **no
-license** (Neovim itself is Apache-2.0), so builds using this fallback must
-keep this repo and its release assets private until upstream licensing is
-resolved (tracked: open an issue upstream).
+```sh
+npm run fetch-assets   # scripts/fetch-engine.mjs
+npm run build
+```
+
+`npm run fetch-assets` reads [`engine.lock.json`](engine.lock.json) — which
+pins the `nvim-wasi` repo, release tag, and per-file SHA-256 — and downloads
+each artifact into `vendor/nvim-wasi/` via `gh release download`, verifying it
+against the pinned hash (a mismatch is fatal). Both repos are private, so this
+needs an authenticated `gh` (`gh auth login`). The fetch is idempotent: an
+artifact already present with a matching hash is skipped.
+
+To move to a new engine build, cut a new `nvim-wasi` release, then update the
+`tag` and `sha256` values in `engine.lock.json` and re-run `npm run
+fetch-assets`.

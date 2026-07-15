@@ -71,23 +71,17 @@ npm run build
 [[ -f dist/chromium/manifest.json ]] || { restore_bump; die "build did not produce dist/chromium/manifest.json"; }
 
 # The build stamps dist/chromium/engine-info.json with which engine landed.
-# The vendored nvim-wasm engine has no upstream license, so releases embedding
-# it must stay private-repo unless explicitly overridden. The first-party
-# clean-room engine (default) carries no such restriction.
+# The engine is the pinned nvim-wasi release artifact (the sole engine source);
+# assert the marker says so, to defend against a stale or hand-tampered build.
 ENGINE_INFO="dist/chromium/engine-info.json"
 [[ -f "$ENGINE_INFO" ]] || { restore_bump; die "build did not produce $ENGINE_INFO"; }
 ENGINE_SOURCE="$(jq -r '.source' "$ENGINE_INFO" 2>/dev/null)" || { restore_bump; die "could not read .source from $ENGINE_INFO (malformed?)"; }
-# Fail closed: proceed only for the known-clean first-party engine. Any other
-# value — "vendored", "null" from a missing key, or a typo — requires the
-# explicit unlicensed-engine override, since this is a legal gate.
-if [[ "$ENGINE_SOURCE" == "cleanroom" ]]; then
-  log "first-party clean-room engine — no license gate"
-elif [[ "${ALLOW_UNLICENSED_ENGINE:-}" == "1" ]]; then
-  log "engine source '$ENGINE_SOURCE' — ALLOW_UNLICENSED_ENGINE=1 override honored"
-else
+ENGINE_TAG="$(jq -r '.tag' "$ENGINE_INFO" 2>/dev/null)" || { restore_bump; die "could not read .tag from $ENGINE_INFO (malformed?)"; }
+if [[ "$ENGINE_SOURCE" != "nvim-wasi" ]]; then
   restore_bump
-  die "engine source '$ENGINE_SOURCE' is not the license-clean first-party build (see README 'Engine'); repo+releases must stay private. Set ALLOW_UNLICENSED_ENGINE=1 to proceed."
+  die "engine source '$ENGINE_SOURCE' is not 'nvim-wasi' — build is stale or tampered; rebuild with a fresh \`npm run fetch-assets\` + \`npm run build\`"
 fi
+log "engine: nvim-wasi $ENGINE_TAG"
 
 ZIP_LATEST="dist/nvim-in-browser-chromium.zip"
 ZIP_VERSIONED="dist/nvim-in-browser-chromium-$VERSION.zip"

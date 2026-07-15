@@ -69,10 +69,10 @@ One engine, two surfaces. Five components:
 
 ### 1. nvim core
 
-Real Neovim compiled to wasm32-wasi via an
-[nvim-wasm](https://github.com/MuNeNICK/nvim-wasm)-style wrapper: upstream
-Neovim source stays unpatched; a wrapper repo owns the shims and builds the
-artifact in CI. Two build variants:
+Real Neovim compiled to wasm32-wasi via a wrapper repo
+([`nvim-wasi`](https://github.com/unknownbreaker/nvim-wasi)): upstream Neovim
+source stays unpatched; the wrapper repo owns the shims, builds the artifact,
+and publishes SHA-pinned releases this extension consumes. Two build variants:
 
 - **Threaded build** — uses SharedArrayBuffer + real threads. Faster. Requires
   COOP/COEP headers, which extension pages can set via the MV3 manifest — so
@@ -305,17 +305,18 @@ Reality checks from the spike — differences from the sections above that later
 milestones should treat as current truth:
 
 - **One build variant for now.** Only the Asyncify build is used on BOTH
-  surfaces (scratch page included), whichever engine source is selected. The
-  threaded/SharedArrayBuffer variant remains a Milestone 2+ optimization.
-- **Engine assets are fetched or built, not committed.** By default the build
-  sources `nvim-asyncify.wasm` + `nvim-runtime.tar.gz` from the first-party
-  clean-room build in `nvim-wasm-prototype/dist/` (see that subproject's
-  README/STATUS.md for its build pipeline). The originally vendored,
-  fetched-and-unlicensed `nvim-wasm` engine remains available as a legacy
-  fallback (`npm run fetch-assets` into gitignored `vendor/`, then
-  `NVIM_ENGINE=vendored npm run build`); that upstream still has no license,
-  so repo/release visibility must stay private whenever that fallback is
-  used — see README.
+  surfaces (scratch page included). The threaded/SharedArrayBuffer variant
+  remains a Milestone 2+ optimization.
+- **Engine is an external pinned dependency, not built in-repo.** The engine
+  (`nvim-asyncify.wasm` + `nvim-runtime.tar.gz`) is built and published by the
+  separate [`nvim-wasi`](https://github.com/unknownbreaker/nvim-wasi) repo
+  (clean-room, no third-party license encumbrance). This extension consumes a
+  SHA-pinned release: `engine.lock.json` pins the repo/tag/hashes, and
+  `npm run fetch-assets` (`scripts/fetch-engine.mjs`) downloads the artifacts
+  into gitignored `vendor/nvim-wasi/` via `gh release download`, verifying each
+  against the pinned SHA-256. `npm run build` copies them into `dist/chromium/`
+  and stamps `engine-info.json` with `{source:"nvim-wasi", tag, files[]}`.
+  There is no in-repo engine-build machinery and no vendored-upstream fallback.
 - **Engine host layout:** core driver lives in `src/engine/nvim-host.ts`
   (env-agnostic: WASI shims via @bjorn3/browser_wasi_shim, Asyncify driver,
   stdio fds); `src/engine/worker.ts` is a thin postMessage shell
@@ -323,15 +324,12 @@ milestones should treat as current truth:
   wakeups/sec every 5s, the idle-CPU instrument). `src/engine/rpc.ts` does
   msgpack-RPC framing; `src/engine/untar.ts` unpacks the runtime archive into
   the in-memory WASI FS (no persistence yet — Milestone 4).
-- **Timer-latency caveat (vendored engine only):** the vendored binary
-  busy-polls stdin with ~1ms clock-only poll subscriptions; the driver
-  achieves idle ≈ 0% via adaptive backoff (cap 1s). Consequence: when idle
-  >250ms, nvim-internal timers (`timeoutlen` mappings, CursorHold) can fire
-  up to ~1s late. Input latency is unaffected (stdin wakes the driver
-  out-of-band, measured ~3ms). Tunable constants in nvim-host.ts. The
-  default first-party clean-room engine subscribes `fd_read` on stdin
-  directly in `poll_oneoff`, so the host's adaptive backoff never engages —
-  idle is genuinely event-driven and this caveat does not apply.
+- **Idle is event-driven.** The nvim-wasi engine subscribes `fd_read` on stdin
+  directly in `poll_oneoff`, so the host parks on real stdin readiness rather
+  than busy-polling; the host's adaptive backoff never engages and idle CPU is
+  genuinely ~0% with no timer-latency penalty. (The host retains the adaptive
+  backoff path — tunable constants in nvim-host.ts — as a safety net for an
+  engine that supplies only clock-poll subscriptions.)
 - **IME composition is NOT yet implemented** (composition keydowns are ignored
   via the "Process" key). Required before real long-form non-ASCII writing.
 - **Escape chord is double-guarded:** swallowed inside the frame AND at the
