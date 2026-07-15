@@ -8,6 +8,7 @@
 //           postMessage from the parent, seeds the buffer, and streams buffer
 //           text back on change (debounced) plus deactivate/ready signals.
 import { NvimClient } from "../engine/client";
+import { openScratchStore, serializeError } from "../scratch/scratch-store";
 import { GridRenderer } from "../ui/grid-renderer";
 import { isEscapeChord, keyEventToNvim } from "../ui/keymap";
 
@@ -37,6 +38,11 @@ const debug = {
 // init()). `:q`/`:wq` can fire after the last debounce flush, so onExit/onFatal
 // relay this cached snapshot rather than losing edits since the last sync.
 let cachedFinalText: string | null = null;
+
+// Full/scratch mode installs a debounced-save callback here so the shared
+// wasm_text_changed handler can drive persistence. Stays null in embed mode,
+// which leaves the embed-only `nvim-text` post as the sole change reaction.
+let scratchOnChange: (() => void) | null = null;
 
 client.onRedraw = (batch) => renderer.apply(batch);
 client.onStat = (wps) => {
@@ -97,13 +103,86 @@ client.onEvent = (method, args) => {
     if (typeof args[0] === "string") cachedFinalText = args[0];
     return;
   }
+  if (method === "clipboard_copy") {
+    // A `+`/`*` yank fired: mirror v:event.regcontents (a list of lines, each a
+    // Uint8Array or string) out to the system clipboard. Runs in both modes.
+    const lines = (args[0] as unknown[]).map(decodeLine);
+    void navigator.clipboard.writeText(lines.join("\n")).catch((e) =>
+      console.warn("[clipboard] write failed:", serializeError(e)),
+    );
+    return;
+  }
   if (method !== "wasm_text_changed") return;
   if (syncTimer !== null) clearTimeout(syncTimer);
   syncTimer = setTimeout(() => {
     syncTimer = null;
     void currentText().then((text) => parent.postMessage({ type: "nvim-text", text }, "*"));
   }, 300);
+  if (scratchOnChange) scratchOnChange();
 };
+
+// Query the RPC channel id from nvim (rather than assuming the embed channel is
+// always 1) and install the buffer autocmds that push edits back over it. Shared
+// by embed mode and full/scratch mode; returns the channel id for callers that
+// want it. TextChanged drives change notifications; VimLeavePre carries the
+// final buffer snapshot for exit relays.
+async function installBufferHooks(): Promise<number> {
+  const apiInfo = (await client.request("nvim_get_api_info", [])) as unknown[];
+  const channel = typeof apiInfo[0] === "number" ? apiInfo[0] : 1;
+  await client.request("nvim_exec2", [
+    [
+      `autocmd TextChanged,TextChangedI * call rpcnotify(${channel}, 'wasm_text_changed')`,
+      `autocmd VimLeavePre * call rpcnotify(${channel}, 'wasm_text_final', join(getline(1,'$'),"\\n"))`,
+      `autocmd TextYankPost * if v:event.regname ==# '+' || v:event.regname ==# '*' | call rpcnotify(${channel}, 'clipboard_copy', v:event.regcontents) | endif`,
+    ].join("\n"),
+    {},
+  ]);
+  return channel;
+}
+
+// Pull the system clipboard into nvim's `+`/`*` registers so `"+p`/`"*p` paste
+// what the user copied elsewhere. Runs on focus/visibility (browsers only grant
+// clipboard reads to the focused document), so the registers reflect the
+// clipboard as of the last sync rather than being always-fresh. Guarded by an
+// in-flight flag so overlapping focus/visibility events don't stack requests.
+let clipboardInFlight = false;
+async function syncClipboardIn(): Promise<void> {
+  if (clipboardInFlight) return;
+  clipboardInFlight = true;
+  try {
+    let text: string;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      return; // no permission / not focused — leave registers as-is
+    }
+    // Normalize CRLF to LF, and treat a trailing newline as "linewise" (a
+    // whole-line copy) rather than leaving a spurious blank element from
+    // split("\n") — "hello\nworld\n".split("\n") is ["hello","world",""].
+    const normalized = text.replace(/\r\n/g, "\n");
+    if (normalized === "") return;
+    const linewise = normalized.endsWith("\n");
+    const body = linewise ? normalized.slice(0, -1) : normalized;
+    const lines = body.split("\n");
+    const regtype = linewise ? "l" : "c";
+    try {
+      await client.request("nvim_call_function", ["setreg", ["+", lines, regtype]]);
+      await client.request("nvim_call_function", ["setreg", ["*", lines, regtype]]);
+    } catch (e) {
+      console.warn("[clipboard] setreg failed:", serializeError(e));
+    }
+  } finally {
+    clipboardInFlight = false;
+  }
+}
+
+// Keep the `+`/`*` registers current whenever this frame regains focus or
+// becomes visible. Registered once; both surfaces call syncClipboardIn after
+// boot for the initial pull.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void syncClipboardIn();
+});
+window.addEventListener("focus", () => void syncClipboardIn());
 
 async function init(seedText: unknown): Promise<void> {
   await client.start(cols, rows);
@@ -111,17 +190,8 @@ async function init(seedText: unknown): Promise<void> {
   if (typeof seedText === "string" && seedText.length > 0) {
     await client.request("nvim_buf_set_lines", [0, 0, -1, false, seedText.split("\n")]);
   }
-  // Push buffer edits to the page over our RPC channel. Query the channel id
-  // from nvim rather than assuming the embed channel is always 1.
-  const apiInfo = (await client.request("nvim_get_api_info", [])) as unknown[];
-  const channel = typeof apiInfo[0] === "number" ? apiInfo[0] : 1;
-  await client.request("nvim_exec2", [
-    [
-      `autocmd TextChanged,TextChangedI * call rpcnotify(${channel}, 'wasm_text_changed')`,
-      `autocmd VimLeavePre * call rpcnotify(${channel}, 'wasm_text_final', join(getline(1,'$'),"\\n"))`,
-    ].join("\n"),
-    {},
-  ]);
+  await installBufferHooks();
+  void syncClipboardIn();
   parent.postMessage({ type: "nvim-ready" }, "*");
   canvas.focus();
 }
@@ -132,8 +202,46 @@ if (mode === "embed") {
     if (m?.type === "nvim-init") void init(m.text);
   });
 } else {
-  void client.start(cols, rows).then(() => {
-    debug.ready = true;
-    canvas.focus();
+  void startScratch();
+}
+
+async function startScratch(): Promise<void> {
+  const store = openScratchStore();
+  let saved: string | null = null;
+  try {
+    saved = await store.load();
+  } catch (e) {
+    console.warn("[scratch] load failed, starting empty:", serializeError(e));
+  }
+  await client.start(cols, rows);
+  debug.ready = true;
+  const channel = await installBufferHooks();
+  void syncClipboardIn();
+  if (saved !== null && saved.length > 0) {
+    await client.request("nvim_buf_set_lines", [0, 0, -1, false, saved.split("\n")]);
+    // Land the cursor at end-of-buffer so restore feels like resuming.
+    await client.request("nvim_input", ["G$"]);
+  }
+  // Debounced save on every buffer change (reuses the wasm_text_changed notify).
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleSave = () => {
+    if (saveTimer !== null) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      void currentText().then((t) => store.save(t)).catch((e) =>
+        console.warn("[scratch] save failed:", serializeError(e)),
+      );
+    }, 400);
+  };
+  scratchOnChange = scheduleSave; // consumed by the onEvent handler
+  // Best-effort flush when the tab is hidden or closing.
+  const flush = () => {
+    void currentText().then((t) => store.save(t)).catch(() => {});
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flush();
   });
+  window.addEventListener("beforeunload", flush);
+  void channel; // channel already used by installBufferHooks; kept for clarity
+  canvas.focus();
 }

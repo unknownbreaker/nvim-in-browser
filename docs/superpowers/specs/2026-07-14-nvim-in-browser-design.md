@@ -292,6 +292,10 @@ Layered, TDD throughout:
    See "Milestone 1 implementation notes" below for deviations from this spec.
 2. **Scratch page:** threaded build, persistent `~/scratch/`, clipboard bridge.
    Easiest surface; proves the engine end-to-end.
+   ✅ **Done 2026-07-15** — the scratch page persists its draft and bridges the
+   system clipboard, browser-verified end-to-end (`scripts/browser-smoke.mjs`
+   PHASE A reload-persistence + PHASE B `"+y` clipboard read).
+   See "Milestone 2 implementation notes" below for the chosen approach.
 3. **Textarea/input overlay:** activation hotkey, sync semantics, escape chord,
    single-line input handling, hostile-page fallback.
 4. **Config & plugins:** virtual FS persistence, options page (editor / URL
@@ -344,6 +348,38 @@ milestones should treat as current truth:
   `define` unless `NVIM_TEST_HOOKS=1`. Note: on this machine system Chrome is
   MDM-managed (unpacked extensions blocked); smokes use Chrome for Testing in
   gitignored `./chrome` (`npx @puppeteer/browsers install chrome@stable`).
+
+## Milestone 2 implementation notes (2026-07-15)
+
+Milestone 2 shipped the scratch page's persistence and clipboard bridge with
+these deviations from the original sequencing item, which later milestones
+should treat as current truth:
+
+- **Buffer-text persistence, not a write-through virtual FS.** Rather than
+  persisting `~/scratch/` through the WASI filesystem, the scratch page saves
+  the buffer's plain text to IndexedDB (`src/scratch/scratch-store.ts`, one doc
+  under key `scratch`) on a 400ms debounce, and reseeds the buffer on boot via
+  `nvim_buf_set_lines`. Simpler, engine-agnostic, and enough for a single-note
+  scratch surface; a real write-through FS is deferred to the Milestone 4 config
+  work. Multi-note scratch is likewise deferred.
+- **Clipboard via `TextYankPost` + focus-sync, no engine changes.** Copy-out is
+  a `TextYankPost` autocmd that fires an `rpcnotify` (`clipboard_copy`) on `+`/`*`
+  yanks; the host mirrors `v:event.regcontents` to `navigator.clipboard.writeText`.
+  Paste-in pulls `navigator.clipboard.readText` into the `+`/`*` registers via
+  `setreg` on `focus`/`visibilitychange` (browsers grant clipboard reads only to
+  the focused document), so registers are fresh as of the last focus/visibility
+  sync rather than always-fresh at paste time. An always-fresh paste would need
+  incoming-`rpcrequest` handling in the host (nvim asking the host for clipboard
+  contents synchronously); that is **deferred**.
+- **Threaded/SharedArrayBuffer build still deferred.** As in Milestone 1, both
+  surfaces run the single Asyncify build; the threaded variant remains a future
+  optimization, not a Milestone 2 deliverable.
+- **Verification:** `scripts/browser-smoke.mjs` gained PHASE A (type a draft →
+  reload the same page in the same browser context → assert the draft survived,
+  proving the IndexedDB round-trip) and PHASE B (`"+y` → real
+  `navigator.clipboard.readText()` from the engine-frame context asserts the
+  yanked text reached the system clipboard; soft-skips with an honest log if a
+  headless environment blocks clipboard reads despite the permission grant).
 
 ## Alternatives considered
 

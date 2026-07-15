@@ -10,7 +10,13 @@ Design: [docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md](docs/super
 1. `npm ci`, `npm run fetch-assets` (pulls the pinned engine — see "Engine"
    below), then `npm run build`
 2. `chrome://extensions` → Developer mode → **Load unpacked** → `dist/chromium/`
-3. **Scratch page:** click the toolbar button — full-page real Neovim.
+3. **Scratch page:** click the toolbar button — full-page real Neovim. Your
+   draft persists across reloads and restarts (saved to IndexedDB, debounced),
+   and the system clipboard is bridged: `"+y`/`"*y` copies out and `"+p`/`"*p`
+   pastes in. Paste-freshness caveat: the `+`/`*` registers are refreshed when
+   the page gains focus or becomes visible (browsers only grant clipboard reads
+   to the focused document), so a paste reflects the clipboard as of the last
+   focus/visibility sync, not always the instant of the paste.
 4. **Overlay:** focus any `<textarea>` or text-like `<input>` and press
    `Ctrl+Shift+E`. Edits sync back live (debounced); `:q` or the escape chord
    `Ctrl+Shift+Esc` closes the overlay (the chord always works, even if your
