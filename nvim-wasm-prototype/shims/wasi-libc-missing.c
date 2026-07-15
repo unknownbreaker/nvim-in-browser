@@ -4,7 +4,10 @@
  * our shims/include headers declare) but does not DEFINE in libc.a, and
  * that upstream libuv translation units reference. Without these the
  * final wasm link fails on undefined symbols even though the code paths
- * are unreachable or expected to fail at runtime.
+ * are unreachable or expected to fail at runtime. Plus one deliberate
+ * REPLACEMENT of a function wasi-libc defines but unusably for
+ * rights-agnostic hosts: access(), routed here via a macro in
+ * uv-wasi-fixups.h (see uv__wasi_access_shim below).
  *
  * WHY / DESIGN: Every stub is honest about capability:
  *   - syscall-shaped functions set errno = ENOSYS and return -1, so
@@ -368,6 +371,43 @@ int dup(int fd) {
 int dup2(int oldfd, int newfd) {
   (void) oldfd; (void) newfd;
   return uv__wasi_enosys();
+}
+
+/* --- access (REAL replacement for wasi-libc's rights-based one) ------------ */
+
+/* wasi-libc implements access(amode != F_OK) by testing the requested
+ * rights against the preopen directory fd's fs_rights_inheriting.
+ * Rights-agnostic hosts (e.g. @bjorn3/browser_wasi_shim, used by the parent
+ * engine host) report ZERO rights on directory fds, so every R_OK/W_OK/X_OK
+ * probe fails EACCES even for perfectly readable files — which breaks
+ * Neovim's os_file_is_readable() and with it nvim__get_runtime()'s Lua
+ * module search (every runtime `require` fails). The preview1 rights system
+ * carries no permission-bit information anyway (filestat has no mode), so
+ * the honest capability answer is: existence == accessible, and the actual
+ * open may still fail. X_OK is granted only for directories (traversal);
+ * nothing is executable under WASI (no processes), so granting X_OK on
+ * files would only mislead os_can_exe().
+ *
+ * NOT a link-level override of the `access` symbol: wasi-libc defines
+ * access() in its monolithic posix.c.obj, which the link extracts anyway
+ * for other symbols — a same-named strong definition here is a guaranteed
+ * duplicate-symbol error (caught by test/uv-linkall.c's link-all gate).
+ * Instead, shims/uv-wasi-fixups.h (force-included into every libuv TU)
+ * #defines access to this function, so both access() call sites in the
+ * link — libuv fs.c's uv_fs_access and unix/core.c's uv__search_path — are
+ * routed here at compile time; both are libuv TUs compiled with the
+ * fixups header, so no behavior change (verified: neither Neovim nor PUC
+ * Lua call access() directly). */
+int uv__wasi_access_shim(const char* path, int amode) {
+  struct stat st;
+
+  if (stat(path, &st) != 0)
+    return -1;  /* errno from stat (ENOENT, ENOTDIR, ...) */
+  if ((amode & X_OK) != 0 && !S_ISDIR(st.st_mode)) {
+    errno = EACCES;
+    return -1;
+  }
+  return 0;
 }
 
 /* --- statfs on top of statvfs (REAL implementation) ------------------------ */

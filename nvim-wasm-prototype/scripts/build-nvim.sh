@@ -82,23 +82,39 @@ require_deps() {
   [[ -x "${HOSTBIN}/lua" ]] || die "missing host lua; run scripts/build-deps.sh"
 }
 
-# --- patch: the one genuine Neovim source patch --------------------------------
+# --- patch: the genuine Neovim source patches -----------------------------------
 # patches/neovim-embed-stdio.patch guards channel_from_stdio()'s --embed fd
 # redirect under !__wasi__ (preview1 has no dup; the redirect would hand the
-# RPC channel fd -1). See the patch header for the full rationale. Applied
-# in place to src-cache/neovim (fetch-sources.sh re-extracts pristine trees
-# only on version bumps); a grep guard keeps this idempotent.
+# RPC channel fd -1). patches/neovim-lua-stdio.patch closes the gap the
+# first one leaves open: with the RPC channel kept on fd 1, user Lua
+# io.write()/io.stdout would corrupt the msgpack stream, so nlua_init()
+# diverts Lua's default io output + io.stdout to stderr under __wasi__.
+# patches/neovim-ts-static.patch pre-registers the statically linked
+# tree-sitter parsers (table in shims/nvim-wasi-treesitter.c) in
+# tslua_init() under __wasi__ — no dlopen exists to load parser/<lang>.so.
+# See the patch headers for the full rationale. Applied in place to
+# src-cache/neovim (fetch-sources.sh re-extracts pristine trees only on
+# version bumps); per-patch grep guards keep this idempotent.
 apply_nvim_patches() {
   CURRENT_STEP="patch"
-  local marker='#elif defined(__wasi__)'
-  if grep -qF "${marker}" "${NVIM_SRC}/src/nvim/channel.c"; then
-    log "patch: neovim-embed-stdio.patch already applied, skipping"
+  apply_one_patch neovim-embed-stdio.patch src/nvim/channel.c \
+    '#elif defined(__wasi__)'
+  apply_one_patch neovim-lua-stdio.patch src/nvim/lua/executor.c \
+    'io.output(io.stderr) io.stdout = io.stderr'
+  apply_one_patch neovim-ts-static.patch src/nvim/lua/treesitter.c \
+    'nvim_wasi_ts_static_langs'
+}
+
+apply_one_patch() {
+  local patch_file="$1" target="$2" marker="$3"
+  if grep -qF "${marker}" "${NVIM_SRC}/${target}"; then
+    log "patch: ${patch_file} already applied, skipping"
     return 0
   fi
-  patch -p1 -d "${NVIM_SRC}" < "${PROTO_ROOT}/patches/neovim-embed-stdio.patch"
-  grep -qF "${marker}" "${NVIM_SRC}/src/nvim/channel.c" \
-    || die "patch applied but marker not found in channel.c"
-  log "patch: applied patches/neovim-embed-stdio.patch"
+  patch -p1 -d "${NVIM_SRC}" < "${PROTO_ROOT}/patches/${patch_file}"
+  grep -qF "${marker}" "${NVIM_SRC}/${target}" \
+    || die "${patch_file} applied but marker not found in ${target}"
+  log "patch: applied patches/${patch_file}"
 }
 
 # --- host-nlua0: native helper module for Neovim's code generators -----------
@@ -162,9 +178,10 @@ build_shim() {
   CURRENT_STEP="shim"
   local out="${LIB}/libnvim-wasi-shim.a"
   local src="${SHIMS}/nvim-wasi-stubs.c"
+  local ts_src="${SHIMS}/nvim-wasi-treesitter.c"
   local async_out="${LIB}/nvim-wasi-asyncify.o"
   local async_src="${SHIMS}/nvim-wasi-asyncify.c"
-  if [[ -f "${out}" && "${out}" -nt "${src}" \
+  if [[ -f "${out}" && "${out}" -nt "${src}" && "${out}" -nt "${ts_src}" \
         && -f "${async_out}" && "${async_out}" -nt "${async_src}" ]]; then
     log "shim: already built (${out}), skipping"
     return 0
@@ -177,7 +194,12 @@ build_shim() {
     -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_GETPID \
     -isystem "${SHIMS}/include" \
     -c "${src}" -o "${w}/nvim-wasi-stubs.o"
-  "${AR_WASI}" rcu "${out}" "${w}/nvim-wasi-stubs.o"
+  # Static tree-sitter parser registry: referenced by the patched
+  # treesitter.c (extraction guaranteed), and its tree_sitter_*() refs in
+  # turn pull the parser archive members in at link time.
+  "${CC_WASI}" --target=wasm32-wasi -O2 -fno-common \
+    -c "${ts_src}" -o "${w}/nvim-wasi-treesitter.o"
+  "${AR_WASI}" rcu "${out}" "${w}/nvim-wasi-stubs.o" "${w}/nvim-wasi-treesitter.o"
   "${RANLIB_WASI}" "${out}"
   # The asyncify scratch-region exports stay a bare OBJECT (not an archive
   # member): nothing references them, so archive extraction would drop them
@@ -213,10 +235,18 @@ configure_nvim() {
   #   wasi-emulated-*  - signal()/clock()/mmap()/getpid() emulation
   #   setjmp           - __wasm_setjmp/__wasm_longjmp runtime for sjlj
   #   luacompat53      - Lua 5.3 C API shims referenced by libluv.a
-  #   nvim-wasi-shim   - our honest-failure process/pty/tmpfile stubs
+  #   nvim-wasi-shim   - our honest-failure process/pty/tmpfile stubs, plus
+  #                      the static tree-sitter parser registry table
+  #   tree-sitter-*    - the 6 statically linked parser archives (7 grammars;
+  #                      markdown exports block+inline). Must come AFTER
+  #                      libnvim-wasi-shim.a: the registry member's
+  #                      tree_sitter_*() references are what pull them in.
   local stdlibs="-lwasi-emulated-signal -lwasi-emulated-process-clocks"
   stdlibs+=" -lwasi-emulated-mman -lwasi-emulated-getpid -lsetjmp"
   stdlibs+=" ${LIB}/libluacompat53.a ${LIB}/libnvim-wasi-shim.a"
+  stdlibs+=" ${LIB}/libtree-sitter-c.a ${LIB}/libtree-sitter-lua.a"
+  stdlibs+=" ${LIB}/libtree-sitter-vim.a ${LIB}/libtree-sitter-vimdoc.a"
+  stdlibs+=" ${LIB}/libtree-sitter-query.a ${LIB}/libtree-sitter-markdown.a"
   # Bare object (always linked, unlike archive members): the asyncify
   # scratch-region exports the parent host discovers at boot.
   stdlibs+=" ${LIB}/nvim-wasi-asyncify.o"

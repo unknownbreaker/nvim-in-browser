@@ -15,6 +15,13 @@ failed experiments get recorded, not erased.
 - [x] 8. Full `smoke-nvim.mjs` PASS including idle-wakeups gate. **(Definition of done)**
 - [ ] 9. Stretch: overlay/browser smokes against our binary; compare binary
       size and boot time vs vendored.
+      **Progress (2026-07-15, parity-gaps Task 4):** the three parity gaps
+      (progpath, io.write RPC safety, static tree-sitter) are closed and
+      `scripts/smoke.sh` now runs `test/parity-check.mjs` immediately after
+      the parent smoke harness passes, so PARITY PASS is part of the
+      standing rung-8+ gate, not a separate manual step. Browser/overlay
+      smokes against our binary (and the size/boot-time comparison) remain
+      the only unchecked stretch item.
 
 ## Log
 
@@ -611,3 +618,360 @@ browser/overlay smokes against our binary not yet run.
 - The packaged runtime tarball is unpruned: it ships the full source
   `runtime/` tree (docs, tutor, etc.), ~2.3% larger than the vendored
   engine's tarball. Pruning unused subtrees is an easy size win for later.
+
+### 2026-07-15 — Parity Task 1: parity gate harness + synthetic uv_exepath
+
+**Gate green:** `node test/parity-check.mjs dist/nvim-asyncify.wasm
+dist/nvim-runtime.tar.gz` prints `PASS progpath: v:progpath =
+"/nvim/bin/nvim"` then **PARITY PASS** (exit 0). `bash scripts/smoke.sh`
+still **SMOKE PASS**; `bash test/uv-smoke.sh` still green (link-all +
+case A/B).
+
+**New harness — `test/parity-check.mjs`** (added to the test inventory):
+a STANDALONE parity gate that boots our `--embed` nvim under the same WASI +
+Asyncify arrangement as the parent host and drives it over msgpack-RPC to
+assert observable behaviours a native nvim exhibits. Usage:
+`node test/parity-check.mjs <wasm> <runtime-tarball>`; prints a PASS/FAIL
+line per check plus `PARITY PASS`/`PARITY FAIL`; exits nonzero on any
+failure. Checks live in a `CHECKS = [{ name, fn(rpc) }]` array so later
+parity tasks append entries; the runner runs whatever checks exist. It
+imports NOTHING from the parent `src/engine/*` — it re-implements inline the
+small pieces it needs (the poll_oneoff Asyncify driver, a ustar reader, and
+msgpack-RPC framing), mirroring the parent's boot pattern per the clean-room
+standalone constraint. Its only third-party imports are
+`@bjorn3/browser_wasi_shim` and `@msgpack/msgpack`, both resolved from the
+parent repo's `node_modules` via normal upward module resolution (works from
+any cwd).
+
+**Check 1 — `progpath`:** asserts `nvim_eval("v:progpath")` is a non-empty
+ABSOLUTE path ending in `nvim`.
+
+- **Failing-first observed value was NOT the empty string the brief
+  predicted — it was the bare `"nvim"`.** With `uv_exepath` returning
+  ENOSYS, neovim's `init_path()` (`main.c`) falls back to
+  `path_guess_exepath()` (`path.c`), which — because the sandbox has no
+  `$PATH` env — copies `argv[0]` ("nvim") verbatim. So a mere "non-empty,
+  ends-in-nvim" check would have passed against the bug. The check therefore
+  additionally requires an **absolute** path, which is the real parity
+  property (a native nvim exposes the absolute exe path) and the whole point
+  of a synthetic exepath. Pre-fix: `FAIL progpath: v:progpath is not an
+  absolute path: "nvim"` (exit 1). Post-fix: `PASS ... "/nvim/bin/nvim"`.
+
+**Fix — `uv_exepath` in `shims/uv-wasi-platform.c`:** was
+`if (bad args) UV_EINVAL; else UV_ENOSYS;`. Now returns a **stable synthetic
+path `"/nvim/bin/nvim"`**, honoring libuv's contract (`*size` in/out: in =
+buffer capacity, out = bytes written excluding NUL; NUL-terminates; copies
+only what fits leaving room for the NUL; `UV_EINVAL` on NULL buffer/size or
+zero capacity). The path is purely synthetic — hosts differ in preopen layout
+(the parent host mounts everything at `/`) and no `/nvim` preopen is required;
+it need not name a real file — nvim only needs an
+absolute, nvim-tailed string for `v:progpath`/`v:progname`.
+*(Correction 2026-07-15: an earlier version of this entry claimed consistency
+with a host `/nvim` preopen convention; no such convention exists.)* The file's WHY
+header comment was updated to document the choice and drop exepath from the
+ENOSYS list. **This closes the rung-4/5 carry-forward "`uv_exepath` ENOSYS →
+`v:progpath` empty".**
+
+**Rebuild mechanics:** `uv_exepath` lives in a libuv shim compiled into
+`libuv.a` by `build-deps.sh`, whose `build_libuv()` skips when `libuv.a`
+already exists (no shim-change detection). So the rebuild path is: delete
+`build/deps/lib/libuv.a` → `bash scripts/build-deps.sh libuv` (re-applies
+`libuv-wasi.patch` idempotently on a fresh extract) → `bash
+scripts/build-nvim.sh` (force-relinks because the archive is newer than
+`bin/nvim`; ninja compile is otherwise a no-op) → `bash scripts/asyncify.sh`.
+Relinked `bin/nvim` = 5,983,592 B; asyncified `dist/nvim-asyncify.wasm` =
+8,040,838 B.
+
+**Still open (unchanged):** the user-Lua `io.write` RPC-corruption known
+limitation above; tree-sitter parser archives built but not linked;
+browser/overlay smokes not yet run.
+
+### 2026-07-15 — Parity Task 2: user Lua io.write()/io.stdout diverted off the RPC fd
+
+**Mechanism decision (investigated BEFORE coding, per the task brief):**
+
+Two candidate mechanisms, in the brief's preference order:
+
+- **(a) C stdio retarget — REJECTED as unviable.** The idea: RPC writes go
+  to fd 1 as *raw uv fd writes* (`uv__io_poll`/`uv_write` on a `uv_pipe`
+  wrapping fd 1) while Lua's `io` library writes through C stdio
+  `FILE *stdout` — so retargeting the `FILE` to fd 2 early in embedded
+  startup would divert every C-stdio stdout writer (Lua io included)
+  without touching the RPC path. Investigation against the pinned
+  wasi-sdk-33 sysroot killed every variant:
+  - `stdout = stderr;` — impossible: wasi-libc's `stdio.h` declares
+    `extern FILE *const stdout;` (const *pointer*; reassignment is a
+    compile error).
+  - Poking the FILE's internal fd field — impossible without internal
+    headers: on WASI, `FILE` is deliberately an **incomplete type**
+    (the sysroot `stdio.h` only defines `struct _IO_FILE` under
+    `__wasilibc_unmodified_upstream`, which is never set for consumers),
+    and musl's internal `stdio_impl.h` is **not shipped anywhere** in the
+    SDK (verified: `find .toolchain/wasi-sdk -name stdio_impl.h` → no
+    matches). Replicating musl's private FILE layout in our own code
+    would couple us to an unversioned internal ABI — rejected as fragile.
+  - `freopen(path, "w", stdout)` — needs a *path*; the sandbox has no
+    `/dev/stderr`/`/dev/fd/2`, so the best it could do is divert stdout
+    into a preopen *file* nobody watches, not stderr.
+  - `fd_renumber` tricks — a non-starter: preview1 `fd_renumber` MOVES an
+    fd (would tear down the RPC channel's fd 1), it cannot alias one.
+- **(b) Lua-level redirect at init — CHOSEN.** New minimal patch
+  `patches/neovim-lua-stdio.patch`: in `nlua_init()`
+  (`src/nvim/lua/executor.c`), immediately after `luaL_openlibs()`, run
+  (under `#ifdef __wasi__`) the chunk
+  `io.output(io.stderr) io.stdout = io.stderr`, and `os_exit(1)` loudly if
+  that chunk somehow fails. Why this exact chunk (verified against pinned
+  Lua 5.1.5 `liolib.c`):
+  - `io.write` is `g_write(L, getiofile(L, IO_OUTPUT))` — it writes to the
+    **default output**, not to the `io.stdout` field; `io.output(io.stderr)`
+    is the documented API for retargeting the default output, so it fixes
+    `io.write(...)` outright.
+  - `io.stdout = io.stderr` additionally catches explicit
+    `io.stdout:write(...)` (the field is just a table slot).
+  - The brief's suggested extra `io.write = function(...) return
+    io.stderr:write(...) end` wrapper was deliberately **dropped**: it
+    would pin `io.write` to stderr forever, silently breaking the
+    legitimate pattern `io.output(somefile); io.write(...)` that plugins
+    use to write files. With the default output already retargeted, the
+    wrapper adds no protection (the only stdout-reaching route left would
+    be the real stdout FILE handle, which is no longer reachable from user
+    Lua: `io.stdout` now names stderr and WASI has no `/dev/stdout` to
+    reopen).
+  - Injection point rationale: `nlua_init()` is the constructor of the
+    single embedded main-thread Lua state, and `luaL_openlibs()` is where
+    the `io` table is born — no user Lua (or runtime Lua) can run before
+    this point. Thread states (`nlua_init_state`) are unreachable under
+    WASI (`uv_thread_create` = ENOSYS), and `nvim -l` script states are
+    not the embedded RPC path, so patching `nlua_init` alone is both
+    sufficient and minimal.
+  - `print()` needs no fix: nvim replaces the global `print` with
+    `nlua_print` (routes through the message system, never fd 1) —
+    verified in `executor.c` and covered by the new `print_safe` baseline
+    parity check.
+
+**Failing-first evidence (checks added BEFORE the fix, run against the
+then-current dist):** two new checks appended to `test/parity-check.mjs`
+(which also grew a `ctx` second argument for checks: a per-request timeout
+helper + captured-stderr access, and the runner now records nvim's stderr):
+
+- `print_safe` (baseline): `nvim_exec_lua("print('x') return 2")` then
+  `nvim_eval("2+2")`, each under a 2 s timeout — **PASSed pre-fix**, as
+  predicted (print never touches fd 1).
+- `io_write_safe`: `nvim_exec_lua("io.write(string.char(0xdc,0x00,0x10))
+  return 1")` (the exact 3-byte sequence proven fatal in Task 7 — a bare
+  msgpack array16 header) then `nvim_eval("1+1")` under a 2 s timeout.
+  Pre-fix: `FAIL io_write_safe: RPC stream dead after 3 bytes of
+  io.write(): timeout after 2000ms waiting for nvim_eval("1+1") after
+  io.write` → `PARITY FAIL` exit 1, with the harness reporting the timeout
+  gracefully instead of hanging. The check is deliberately LAST in the
+  CHECKS array: against an unfixed build it kills the RPC session, so
+  anything after it would fail spuriously. It also asserts (post-fix) that
+  the three junk bytes actually LANDED on stderr — diverted, not
+  swallowed — and it fires the exec_lua without awaiting it first, since on
+  an unfixed build even that response is eaten by the desynced framing.
+
+**Post-fix result:** `patches/neovim-lua-stdio.patch` applied by a new
+per-patch guard loop in `build-nvim.sh` (`apply_one_patch`, grep-guarded
+and idempotent like before); rebuild + `asyncify.sh` → relinked `bin/nvim`
+5,983,839 B, `dist/nvim-asyncify.wasm` 8,041,186 B. Parity run: all three
+checks PASS (`io.write junk diverted to stderr; RPC intact (exec_lua -> 1,
+eval 1+1 -> 2)`; the 0xdc 0x00 0x10 bytes visibly arrive on the stderr
+capture) → **PARITY PASS**. Full regression: `bash scripts/smoke.sh` →
+**SMOKE PASS** (idle wake-ups 0.00/s, post-idle edit OK); `bash
+test/uv-smoke.sh` → link-all + case A/B green. Docs updated:
+`neovim-embed-stdio.patch` header (limitation → resolved, pointing at the
+companion patch) plus the in-tree channel.c comment re-synced, README patch
+inventory + engine-swap paragraph (io.write gap closed, progpath gap from
+Parity Task 1 also reflected). **This closes the Task-7 "KNOWN LIMITATION —
+user Lua io.write()/io.stdout corrupts the RPC stream" open item.** The
+remaining theoretical hole — a non-Lua C-level stdout writer inside nvim —
+is documented in the patch header; nothing in the embedded headless path
+writes to C stdout.
+
+**Still open (unchanged):** tree-sitter parser archives built but not
+linked; browser/overlay smokes not yet run.
+
+### 2026-07-15 — Parity Task 3: statically linked tree-sitter parsers
+
+**Step-1 investigation (v0.12.4 parser-loading path, documented before
+coding):**
+
+- **Lua side (`runtime/lua/vim/treesitter/language.lua`):**
+  `vim.treesitter.language.add(lang)` first calls
+  `vim._ts_has_language(lang)` and returns `true` immediately if the
+  language is already registered — BEFORE any runtime-path lookup. Only on
+  a miss does it call `api.nvim_get_runtime_file('parser/<lang>.*')` (and
+  returns `nil, 'No parser for language …'` if no file exists) and then
+  `vim._ts_add_language_from_object(path, lang, symbol)`. Note `add`
+  reports "no parser" as a `nil` RETURN, not an error — a bare
+  `pcall(add, lang)` returns `true, nil` on a missing parser, so parity
+  checks must assert the returned value, not just pcall success.
+- **C side (`src/nvim/lua/treesitter.c`):** all registered languages live
+  in a file-static process-global map `static PMap(cstr_t) langs`;
+  `vim._ts_has_language` is `map_has` on it. `add_language()` (behind
+  `_ts_add_language_from_object`) resolves parsers exclusively via
+  `uv_dlopen(path)` + `uv_dlsym("tree_sitter_<symbol>")`
+  (`load_language_from_object`), ABI-checks the result
+  (`TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION` ..
+  `TREE_SITTER_LANGUAGE_VERSION`), then `pmap_put`s it. Under WASI
+  `uv_dlopen` can never succeed (no dynamic loading exists).
+- **No static-registration hook exists in v0.12.4** (verified, per the
+  brief's instruction to check before shimming): the only other load path
+  is `HAVE_WASMTIME`'s `_ts_add_language_from_wasm`, which READS A .wasm
+  FILE from disk into wasmtime (`ts_wasm_store_load_language`) — it is
+  file/path-based too, is OFF in our build (`ENABLE_WASMTIME` defaults
+  off; wasmtime was never fetched), and registers a *wasm-store* language,
+  not a native `TSLanguage*`. There is no API anywhere that accepts an
+  in-process `TSLanguage*` (no lightuserdata entry point), so the "pure
+  shim, no patch" shape is impossible: the `langs` map is file-static and
+  only reachable through dlopen-shaped code.
+- **Mechanism chosen (smallest honest patch):** pre-register all 7
+  statically linked grammars into the `langs` map at `tslua_init()` time
+  under `#ifdef __wasi__`, from a table exported by a new shim TU
+  (`shims/nvim-wasi-treesitter.c`) that references all 7
+  `tree_sitter_*()` constructors (which also forces wasm-ld to extract
+  the parser archive members at link time — no whole-archive tricks
+  needed). With the map pre-populated, `language.add('<lang>')` hits the
+  `_ts_has_language` fast path and returns `true` without ever consulting
+  the runtime path or dlopen — zero runtime-Lua modification, exactly the
+  upstream fast path. The patch mirrors `add_language()`'s ABI-range
+  check (skip + loud stderr line on mismatch, which parity would then
+  catch as a missing grammar). Registration cost is 7 map inserts at Lua
+  state init; parser constructors just return pointers to static tables —
+  no timers, no fds, idle gate unaffected.
+- Baseline sizes before the change: `build/nvim/bin/nvim` = 5,983,839 B;
+  `dist/nvim-asyncify.wasm` = 8,041,186 B.
+
+**Failing-first surprise — a SECOND, unplanned blocker found by the new
+check:** the failing-first run did not fail with the predicted `no-c`; it
+failed with `module 'vim.treesitter' not found`. Probe-driven diagnosis
+(temporary harness fork, since deleted):
+
+- `require('vim.treesitter')` fails even though the tarball ships
+  `runtime/lua/vim/treesitter.lua`, `&rtp` contains `/runtime`,
+  `nvim_get_runtime_file('lua/vim/treesitter.lua')` FINDS the file,
+  `loadfile('/runtime/lua/vim/treesitter.lua')` works, and
+  `vim._load_package` IS installed at `package.loaders[2]`.
+- The break is one level down: `vim._load_package` uses
+  `vim.api.nvim__get_runtime(paths, false, {is_lua=true})`
+  (`runtime/lua/vim/_init_packages.lua`), and `runtime_get_named_common()`
+  (`src/nvim/runtime.c`) accepts a hit only if `os_file_is_readable()` —
+  libuv `uv_fs_access(..., R_OK)` — succeeds. `vim.fn.filereadable()` of
+  the same path returned 0: **`access(R_OK)` always fails under
+  `@bjorn3/browser_wasi_shim`.** (`nvim_get_runtime_file` takes the
+  glob/scandir path instead, which never calls `access` — that's why it
+  disagreed.)
+- Root cause, empirically confirmed with a 20-line wasm C probe run under
+  the same shim arrangement: the shim's `OpenDirectory.fd_fdstat_get()`
+  reports `fs_rights_base = fs_rights_inheriting = 0`, and wasi-libc's
+  `faccessat()` implements `access(amode != F_OK)` as a check of the
+  requested rights against the directory fd's `fs_rights_inheriting` →
+  0 rights means every `R_OK`/`W_OK`/`X_OK` probe fails `EACCES`
+  ("Permission denied"), while `stat()` and `F_OK` succeed. The parent
+  host (`src/engine/nvim-host.ts`) uses the same stock `PreopenDirectory`,
+  so this affects the real engine-swap environment, not just the parity
+  harness; Node's uvwasi (rungs 1–4) reports full rights, which is why no
+  earlier rung ever tripped it. The smoke path never requires runtime Lua
+  modules, which is why rung 8 passed.
+- Consequence: EVERY runtime-Lua `require` (vim.treesitter, vim.fs users,
+  anything not embedded in the binary) was broken under the browser-shim
+  host — a parity gap much wider than tree-sitter; the new check just
+  happened to be the first to require a runtime module.
+- Fix (shim-side, not harness-side, so the binary is robust under any
+  rights-agnostic host and the parity harness keeps mirroring the parent
+  host faithfully): a stat-based `access()` replacement — existence via
+  `stat()` grants `F_OK`/`R_OK`/`W_OK` (preview1 filestat carries no
+  permission bits; actual open can still fail honestly), `X_OK` granted
+  for directories only (nothing is executable under WASI — keeps
+  `os_can_exe()` honest).
+  - **First attempt FAILED, recorded per append-mostly convention:**
+    defining a strong `access` symbol in `wasi-libc-missing.c` to shadow
+    wasi-libc's, on the theory that libc's member would never be
+    extracted. The rung-3 link-all gate (`test/uv-linkall.c`) immediately
+    caught it: wasi-libc defines `access` in its MONOLITHIC
+    `posix.c.obj`, which the link extracts anyway for other symbols →
+    guaranteed duplicate-symbol error. (That gate earning its keep,
+    second time.)
+  - Landed shape: the function is named `uv__wasi_access_shim`
+    (`shims/wasi-libc-missing.c`), and `shims/uv-wasi-fixups.h`
+    (force-included into every libuv TU) `#define`s `access` to it —
+    compile-time routing of both `access()` call sites in the link: libuv
+    fs.c's `uv_fs_access` and unix/core.c's `uv__search_path` (verified —
+    `uv__search_path` also calls `access(X_OK)`; no direct calls in Neovim
+    or PUC Lua sources). Both call sites are libuv TUs compiled with the
+    same fixups header, so this is compile-time routing, not two separate
+    fixes — no behavior change. No symbol conflict is possible.
+
+**Failing-first evidence:** new `treesitter` parity check appended to
+`test/parity-check.mjs` (placed BEFORE `io_write_safe`, which must stay
+last): asserts all 7 grammars register (`pcall(language.add, lang)` AND
+truthy return AND `vim._ts_has_language(lang)` — the return-value check
+matters, see above) and that
+`get_string_parser('int x;','c'):parse()[1]:root():type()` is
+`translation_unit` (a real parse, not just registration). Against the
+pre-fix dist: `FAIL treesitter: ... module 'vim.treesitter' not found` →
+`PARITY FAIL` exit 1 (the access() gap masked the predicted `no-c`
+failure mode — the check never got as far as language.add).
+
+**Implementation (rest of the mechanism, as chosen in Step 1):**
+
+- `shims/nvim-wasi-treesitter.c` (new): `{name, constructor}` table of all
+  7 grammars, referencing the 7 `tree_sitter_*()` symbols — this is what
+  forces wasm-ld to extract the parser archive members (no whole-archive
+  needed; treesitter.c references the table, the table references the
+  parsers). Compiled into `libnvim-wasi-shim.a` (safe as an archive
+  member — unlike the asyncify object, it IS referenced).
+- `patches/neovim-ts-static.patch` (nvim patch #3): `__wasi__`-guarded
+  hunk in `tslua_init()` walking the table into the `langs` map, with
+  `add_language()`'s ABI-range validation (skip + loud stderr on
+  mismatch) and a `map_has` guard for idempotent re-init.
+- `scripts/build-nvim.sh`: applies the patch (same grep-guarded
+  `apply_one_patch` flow), compiles the new shim TU into the shim
+  archive, and appends the 6 parser archives to
+  `CMAKE_C_STANDARD_LIBRARIES` AFTER `libnvim-wasi-shim.a` (wasm-ld
+  scans archives left-to-right; the registry member's references are
+  what pull the parsers in).
+
+**Gate results (all green):**
+
+- `node test/parity-check.mjs dist/...` → 4/4 checks:
+  `PASS treesitter: all 7 grammars registered; get_string_parser('int
+  x;','c') parsed (root: translation_unit)` → **PARITY PASS**; the three
+  prior checks stayed green.
+- `bash scripts/smoke.sh` → **SMOKE PASS**; idle gate holds (2 wake-ups
+  over 10 s, final 5 s sample 0.00/s ≤ 5/s) — parser registration adds
+  no timers/fds, as designed.
+- `bash test/uv-smoke.sh` → link-all + case A/B green (this gate is also
+  what caught the failed access()-override attempt above).
+
+**Size delta (parsers + access shim):**
+
+| artifact | before | after | delta |
+| --- | --- | --- | --- |
+| `build/nvim/bin/nvim` (pre-asyncify) | 5,983,839 B | 9,168,111 B | +3,184,272 B (+53%) |
+| `dist/nvim-asyncify.wasm` | 8,041,186 B | 10,825,005 B | +2,783,819 B (+35%) |
+
+Above the brief's ~1–2 MB estimate: the 6 archives total ~3.3 MB of wasm
+objects (vim 1.5 MB, markdown 877 KB, c 662 KB, vimdoc 276 KB, lua 67 KB,
+query 23 KB) and parser tables are pure data — nothing for `-O2`/asyncify
+to shrink. The asyncified binary is now ~29% LARGER than the vendored
+engine's 8,386,869 B (it was 4.1% smaller before this task) — the honest
+cost of embedding 7 grammars. **This closes the "tree-sitter parser
+archives built but not linked" open item.**
+
+**Still open:**
+
+- Browser/overlay smokes against our binary not yet run (rung-9 stretch).
+- Future TUs calling `access()` directly (outside libuv's fixups-header
+  coverage) silently get wasi-libc's broken rights-based `access()` — the
+  fix is scoped to libuv TUs via `shims/uv-wasi-fixups.h`'s force-include,
+  not a link-wide symbol override (a genuine link-wide override is
+  impossible — see the header's own comment on the duplicate-symbol
+  failure this would cause).
+- Tree-sitter grammars are always-linked (+2.8MB asyncified, binary now
+  +29% vs vendored); make them build-time opt-in if size matters.
+- `vim.uv` can still write to fd 1 deliberately (e.g.
+  `vim.uv.new_pipe():open(1)` + write) and corrupt the RPC stream. Unlike
+  the accidental `io.write()` footgun (fixed), this requires explicit
+  intent and is indistinguishable from it — accepted residual, revisit only
+  if hostile-config isolation ever becomes a goal.

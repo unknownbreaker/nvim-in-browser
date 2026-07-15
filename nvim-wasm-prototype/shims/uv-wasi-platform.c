@@ -7,7 +7,17 @@
  * (linux.c, darwin.c, ...) that this port does not compile.
  *
  * WHY / DESIGN: Queries that cannot be answered under WASI preview1
- * return honest UV_ENOSYS (exepath, cpu_info). Memory queries return
+ * return honest UV_ENOSYS (cpu_info). exepath is special: preview1 has no
+ * notion of "path to the running executable", but returning ENOSYS makes
+ * neovim's init_path() fall back to path_guess_exepath(), which with no
+ * $PATH in the sandbox copies the bare argv[0] ("nvim") into v:progpath —
+ * a non-absolute string that breaks parity with a native nvim and any
+ * runtime logic that treats v:progpath as a real path. Instead we synthesize
+ * a STABLE, ABSOLUTE path "/nvim/bin/nvim". The path is purely synthetic —
+ * hosts differ in preopen layout (the parent host mounts everything at "/")
+ * and no host needs a "/nvim" preopen for this to work.
+ * It is not a file that must exist; nvim only needs an absolute, nvim-tailed
+ * string for v:progpath/v:progname. Memory queries return
  * real, if coarse, numbers derived from the wasm linear memory
  * (memory.size * 64KiB used; a fixed 4 GiB-per-wasm32 ceiling for
  * "total") so callers doing arithmetic get sane values instead of lies.
@@ -26,7 +36,12 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <unistd.h>
+
+/* Synthetic, stable executable path for the wasm sandbox. Absolute and
+ * nvim-tailed; purely synthetic, independent of any host preopen layout. */
+#define UV__WASI_EXEPATH "/nvim/bin/nvim"
 
 /* wasm32 linear memory: pages are 64 KiB; address space caps at 4 GiB. */
 #define UV__WASI_PAGE_SIZE 65536ULL
@@ -37,10 +52,21 @@ static uint64_t uv__wasi_memory_used(void) {
 }
 
 int uv_exepath(char* buffer, size_t* size) {
-  /* There is no "path to the running executable" inside the sandbox. */
+  /* libuv contract: *size is in/out (in: buffer capacity including room for
+   * the NUL; out: bytes written EXCLUDING the NUL). NUL-terminate; return
+   * UV_EINVAL on NULL buffer/size or zero capacity. There is no real
+   * executable path in the sandbox, so we hand back a stable synthetic one
+   * (see the WHY note in this file's header). */
   if (buffer == NULL || size == NULL || *size == 0)
     return UV_EINVAL;
-  return UV_ENOSYS;
+
+  size_t path_len = strlen(UV__WASI_EXEPATH);
+  /* Copy as much as fits, always leaving room for the terminating NUL. */
+  size_t copy_len = path_len < *size - 1 ? path_len : *size - 1;
+  memcpy(buffer, UV__WASI_EXEPATH, copy_len);
+  buffer[copy_len] = '\0';
+  *size = copy_len;
+  return 0;
 }
 
 uint64_t uv_get_free_memory(void) {

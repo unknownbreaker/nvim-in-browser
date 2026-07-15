@@ -31,6 +31,24 @@ int chown(const char *, uid_t, gid_t);
 int fchown(int, uid_t, gid_t);
 int lchown(const char *, uid_t, gid_t);
 
+/* access(): wasi-libc's implementation checks the requested rights against
+ * the preopen directory fd's fs_rights_inheriting, so under rights-agnostic
+ * hosts (zero-rights fdstat, e.g. @bjorn3/browser_wasi_shim) every
+ * R_OK/W_OK/X_OK probe fails EACCES even for readable files — breaking
+ * Neovim's os_file_is_readable() and every runtime-Lua `require`. Route both
+ * access() call sites in the link — libuv fs.c's uv_fs_access and unix/
+ * core.c's uv__search_path (PATH lookup for uv_spawn, unreachable at
+ * runtime here but still compiled) — to the stat-based replacement in
+ * wasi-libc-missing.c; both are libuv TUs, so the same force-included
+ * fixups header covers both with no behavior change. A link-level override
+ * of the `access` symbol is impossible: wasi-libc defines it in the
+ * monolithic posix.c.obj, which is extracted anyway (duplicate-symbol
+ * error, caught by the uv-linkall gate). The function-like macro also
+ * rewrites unistd.h's own declaration into a (consistent) declaration of
+ * the shim — harmless. */
+int uv__wasi_access_shim(const char *, int);
+#define access(path, amode) uv__wasi_access_shim(path, amode)
+
 /* Socket options wasi-libc's wasip1 <sys/socket.h> omits (it only defines
  * SO_TYPE/SOL_SOCKET for preview1). Values follow the conventional
  * Linux/musl ABI; on this target every setsockopt/getsockopt fails with

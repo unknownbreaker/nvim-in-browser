@@ -58,13 +58,14 @@ nvim-wasm-prototype/
     smoke.sh           # rung-8 gate: parent smoke harness vs dist/ artifacts
     wasi-toolchain.cmake
   shims/               # clean-room libuv/nvim WASI shim layer (see STATUS.md)
-  patches/             # provenance-headered patches (lua, libuv, nvim embed-stdio)
+  patches/             # provenance-headered patches (lua, libuv, 3x nvim)
   test/
     hello.c            # rung-1 smoke test: wasm32-wasi hello world
     run-wasi.mjs       # Node runner for .wasm binaries via node:wasi
     uv-smoke.{c,sh} uv-linkall.c   # rung-3 libuv gate
     check-module.mjs   # rung-4 gate: module compiles, _start+memory exported
     check-asyncify.mjs # rung-5 gate: asyncify ABI + scratch-helper exports
+    parity-check.mjs   # parity gate: progpath, print/io.write safety, treesitter
   .toolchain/ build/ src-cache/ dist/   # all gitignored, produced by scripts
 ```
 
@@ -79,13 +80,16 @@ bash scripts/build-deps.sh        # 13 wasm archives + host lua
 bash scripts/build-nvim.sh        # build/nvim/bin/nvim (wasm32-wasi)
 bash scripts/asyncify.sh          # dist/nvim-asyncify.wasm
 bash scripts/package-runtime.sh   # dist/nvim-runtime.tar.gz
-bash scripts/smoke.sh             # rung-8 gate: parent smoke-nvim.mjs -> SMOKE PASS
+bash scripts/smoke.sh             # rung-8+ gate: parent smoke-nvim.mjs -> SMOKE PASS, then parity-check.mjs -> PARITY PASS
 ```
 
 `scripts/smoke.sh` points the parent repo's real harness
 (`../scripts/smoke-nvim.mjs`) at the two `dist/` artifacts via
 `NVIM_WASM_PATH`/`NVIM_RUNTIME_PATH`; PASS includes the idle-wakeups
-assertion (final sample ≤5/s; this build measures ~0/s idle).
+assertion (final sample ≤5/s; this build measures ~0/s idle). Once the
+parent smoke passes, `scripts/smoke.sh` also runs `test/parity-check.mjs`
+against the same two artifacts, so a single invocation gives both
+`SMOKE PASS` and `PARITY PASS`.
 
 ## Results (2026-07-15)
 
@@ -96,7 +100,7 @@ idle-CPU gate.
 
 | Metric | Clean-room build | Vendored (nvim-wasm) |
 |---|---|---|
-| Asyncified binary | 8,040,769 B | 8,386,869 B |
+| Asyncified binary | 10,825,005 B (incl. 7 statically linked tree-sitter grammars; 8,041,186 B before them — 417 B above the original rung-8 baseline of 8,040,769 B, the cumulative effect of two prior rebuilds, the `uv_exepath` synthetic-path shim (+69 B) and the Lua-stdio patch (+348 B), not measurement error; see `STATUS.md`) | 8,386,869 B |
 | Runtime tarball | 5,742,514 B | 5,613,852 B |
 | Idle poll wakeups (final 5s sample) | 0.00/s | 1/s (needs host backoff) |
 
@@ -116,16 +120,55 @@ never engages — idle is genuinely event-driven.
 - `patches/libuv-wasi.patch` — 3 build-system hunks; the real work is the
   clean-room shim layer in `shims/` (poll_oneoff-backed `uv__io_poll`,
   fd-less `uv_async`, inline threadpool, honest ENOSYS stubs)
-- `patches/neovim-embed-stdio.patch` — the single Neovim source patch:
-  `#elif defined(__wasi__)` keeps RPC on fds 0/1 (preview1 has no dup)
+- `patches/neovim-embed-stdio.patch` — `#elif defined(__wasi__)` keeps RPC
+  on fds 0/1 (preview1 has no dup)
+- `patches/neovim-lua-stdio.patch` — companion to the above: `nlua_init()`
+  diverts Lua's default io output + `io.stdout` to stderr under `__wasi__`,
+  so user Lua `io.write()`/`io.stdout:write()` cannot corrupt the RPC
+  stream on fd 1
+- `patches/neovim-ts-static.patch` — `tslua_init()` pre-registers the 7
+  statically linked tree-sitter grammars (table in
+  `shims/nvim-wasi-treesitter.c`) under `__wasi__`, so
+  `vim.treesitter.language.add()` succeeds via the `_ts_has_language`
+  fast path — WASI has no dlopen for `parser/<lang>.so`
 
 **What an engine swap would take:** the parent host runs this binary
 unchanged (same argv/env/preopens/Asyncify ABI, incl. the
-`nvim_asyncify_get_*` scratch exports). Remaining parity gaps before
-replacing the vendored engine: tree-sitter parser archives are built but not
-linked (`vim.treesitter` highlight unavailable), `uv_exepath` is ENOSYS
-(`v:progpath` empty), and — most important before user configs run — user
-Lua `io.write()` writes to fd 1 and corrupts the RPC stream (upstream's
-stdio redirect is unimplementable under preview1; a Lua-level
-`io.write`/`io.stdout` redirect is required). Full open-items list in
-`STATUS.md`.
+`nvim_asyncify_get_*` scratch exports). **All three parity gaps that would
+have blocked a swap are now closed**, each proven by a permanent check in
+`test/parity-check.mjs` — folded into `scripts/smoke.sh`'s standing gate
+(`bash scripts/smoke.sh` now prints `SMOKE PASS` then `PARITY PASS`), not a
+one-off manual run:
+
+- **`v:progpath` empty:** `uv_exepath` returns a synthetic absolute path
+  (`/nvim/bin/nvim`) instead of `ENOSYS` (`progpath` check).
+- **`io.write()`/`io.stdout` corrupting the RPC stream:** `nlua_init()`
+  diverts Lua's default io output and `io.stdout` to stderr under
+  `__wasi__`, since upstream's own stdio-redirect mechanism is
+  unimplementable under preview1 (no fd-duplication primitive) —
+  `io_write_safe`/`print_safe` checks.
+- **`vim.treesitter` needing dlopen:** all 7 pinned grammars (c, lua, vim,
+  vimdoc, query, markdown, markdown_inline) are statically linked and
+  pre-registered at `tslua_init()` time; fixing this also un-broke every
+  runtime-Lua `require` under zero-rights hosts like the browser shim
+  (wasi-libc's rights-based `access()` was routed to a stat-based shim for
+  both of libuv's `access()` call sites) — `treesitter` check.
+
+What remains before an engine-swap decision is made is **product
+decisions, not correctness gaps**:
+
+- **Binary size:** the asyncified binary is ~29% larger than the vendored
+  engine's 8,386,869 B, entirely the cost of the 7 embedded tree-sitter
+  grammars (+2.8 MB) — making them build-time opt-in would recover the
+  size for callers that don't need in-wasm `vim.treesitter`.
+- **Tarball pruning:** the packaged runtime tarball ships the full source
+  `runtime/` tree (docs, tutor, etc.), ~2.3% larger than the vendored
+  engine's tarball; pruning unused subtrees is a straightforward size win.
+- **Asyncify-stack overflow assert:** the 4 MiB `.bss` unwind stack has no
+  overflow assertion compiled in (binaryen's `asyncify-asserts` pass-arg
+  exists if this is ever suspected as the cause of a corruption bug).
+- **Threaded build:** `uv_thread_create` is an honest `ENOSYS`, so the wasm
+  build must stay on the `--embed` headless path; a real threaded build is
+  a separate, larger undertaking, not part of this parity work.
+
+Full open-items list in `STATUS.md`.
