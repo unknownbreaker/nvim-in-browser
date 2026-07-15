@@ -530,13 +530,24 @@ event-driven idle: 0 wakeups in the final 5-second window.
   implementation (preview1 `fd_renumber` MOVES, nothing dups), so the RPC
   channel got fd −1. Fix: **the port's first genuine Neovim patch**,
   `patches/neovim-embed-stdio.patch` — a new `#elif defined(__wasi__)`
-  branch in `channel_from_stdio()` that keeps fds 0/1 directly. The
-  redirect's two purposes (hide RPC fds from child processes; shield the
-  RPC stream from stray stdout writers) are both moot inside preview1.
-  Honest-shim alternatives were examined and rejected: faking dup would
-  require intercepting every subsequent fd op at the libc boundary.
-  Applied by a new idempotent `patch` step in build-nvim.sh (grep-guarded,
-  in-place on src-cache/neovim).
+  branch in `channel_from_stdio()` that keeps fds 0/1 directly, because
+  preview1 has no fd-duplication primitive at all — the redirect cannot be
+  implemented, so this is the only option, not a judgment call. **This is
+  NOT a free lunch, and the patch header previously overclaimed that it
+  was:** of the redirect's two upstream purposes, hiding RPC fds from child
+  processes is genuinely moot (preview1 has none), but shielding the RPC
+  stream from stray stdout writers is NOT moot — it was empirically
+  disproved. A user Lua `io.write()` call writes straight to fd 1; 3 bytes
+  of `io.write()` output permanently desynced the msgpack-RPC framing and
+  killed the RPC session in testing. The gap is acceptable for the current
+  gate only because it runs `nvim -u NORC --noplugin` (no user Lua ever
+  executes). See the open-items list below — this must be closed (a
+  Lua-level redirect of `io.write`/`io.stdout` to stderr or a host sink)
+  before any milestone that runs user configs. Honest-shim alternatives to
+  the patch itself were examined and rejected: faking dup would require
+  intercepting every subsequent fd op at the libc boundary. Applied by a
+  new idempotent `patch` step in build-nvim.sh (grep-guarded, in-place on
+  src-cache/neovim).
 - **Rung 5 asyncify itself:** `scripts/asyncify.sh` = `wasm-opt -O2
   --asyncify --pass-arg=asyncify-imports@wasi_snapshot_preview1.poll_oneoff`
   (flags verified against binaryen-130 `--help`). **The feared
@@ -582,3 +593,21 @@ event-driven idle: 0 wakeups in the final 5-second window.
 built but not linked (upstream dlopens; `vim.treesitter` parsers absent);
 `uv_exepath` ENOSYS → `v:progpath` empty (harmless for the smoke path);
 browser/overlay smokes against our binary not yet run.
+
+- **KNOWN LIMITATION — user Lua `io.write()`/`io.stdout` corrupts the RPC
+  stream.** `patches/neovim-embed-stdio.patch` keeps fds 0/1 as the RPC
+  channel endpoints because preview1 has no fd-duplication primitive to do
+  otherwise. Acceptable for the current gate (`nvim -u NORC --noplugin`,
+  no user Lua runs), but a real gap, not a moot one: a user `io.write()`
+  call writes directly to fd 1 and permanently desyncs msgpack-RPC framing
+  (empirically verified — 3 bytes of `io.write()` output killed the RPC
+  session). Must be fixed — a Lua-level redirect of `io.write`/`io.stdout`
+  (and `print`) to stderr or a host-provided sink — before any milestone
+  that runs user configs.
+- The asyncify unwind stack is a fixed 4 MiB `.bss` buffer with no overflow
+  assertion compiled in (binaryen's `asyncify-asserts` pass-arg exists if
+  overflow is ever suspected; deepest observed unwind chains are far below
+  4 MiB, but nothing currently catches an overrun).
+- The packaged runtime tarball is unpruned: it ships the full source
+  `runtime/` tree (docs, tutor, etc.), ~2.3% larger than the vendored
+  engine's tarball. Pruning unused subtrees is an easy size win for later.

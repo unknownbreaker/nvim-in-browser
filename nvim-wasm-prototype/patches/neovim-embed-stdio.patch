@@ -10,10 +10,24 @@
 # no fd-duplication primitive at all (fd_renumber MOVES an fd; there is no
 # dup), so fcntl(F_DUPFD_CLOEXEC) fails under wasi-libc and the channel
 # would be initialized with fd -1 — the rung-5 blocker recorded in
-# STATUS.md. The redirect is also pointless inside the sandbox: preview1
-# has no processes to inherit fds and no other writer that could race the
-# RPC stream. A new #elif defined(__wasi__) branch keeps fds 0/1 as the
-# channel endpoints, which is exactly what the wasm host wires up.
+# STATUS.md. The redirect simply cannot be implemented under preview1, so
+# keeping fds 0/1 as the channel endpoints is the only option available —
+# not a judgment call that the redirect's purposes don't apply here.
+#
+# KNOWN LIMITATION (do not remove this note without re-verifying): purpose
+# (b) above is NOT moot inside the sandbox. It was empirically disproved —
+# a user Lua `io.write()` call writes straight to fd 1, and 3 bytes of
+# io.write() output permanently desynced the msgpack-RPC framing and killed
+# the RPC session in testing. Purpose (a) (hiding the fds from child
+# processes) is genuinely moot — preview1 has no child processes — but (b)
+# is real and unaddressed by this patch. This is still an ACCEPTABLE gap
+# for the current prototype gate, which runs nvim -u NORC --noplugin (no
+# user Lua ever executes). It becomes a hard blocker before any milestone
+# that runs user configs: a Lua-level redirect of `io.write`/`io.stdout`
+# (and `print`, which routes through them) to stderr, or to a host-provided
+# sink, must be installed before user Lua can run. A new #elif
+# defined(__wasi__) branch keeps fds 0/1 as the channel endpoints, which is
+# exactly what the wasm host wires up.
 #
 # Alternatives considered and rejected: implementing F_DUPFD in the shim
 # layer is impossible to do honestly (fd_renumber invalidates the source
