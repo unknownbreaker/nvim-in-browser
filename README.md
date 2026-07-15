@@ -30,6 +30,13 @@ npm run build        # -> dist/chromium (load via chrome://extensions -> Load un
 npm run typecheck
 ```
 
+The default engine is the local clean-room build in `nvim-wasm-prototype/dist/`
+(built by the prototype pipeline). Set `NVIM_ENGINE=vendored npm run build` to
+bundle the legacy fetched engine from `vendor/nvim-wasm/` instead (run
+`npm run fetch-assets` first). Each build stamps `dist/chromium/engine-info.json`
+recording which engine (`cleanroom` or `vendored`) landed and its file
+byte sizes + SHA-256s.
+
 ## Release
 
 ```sh

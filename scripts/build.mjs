@@ -1,5 +1,6 @@
 import { build } from "esbuild";
-import { access, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -53,20 +54,60 @@ await cp(
   path.join(outDir, "engine-frame.html"),
 );
 
-// Copy the vendored Neovim engine assets alongside the worker bundle. These are
-// fetched (and pinned) by `npm run fetch-assets`; fail loudly if they're absent.
-const vendorDir = path.join(root, "vendor", "nvim-wasm");
-for (const asset of ["nvim-asyncify.wasm", "nvim-runtime.tar.gz"]) {
-  const src = path.join(vendorDir, asset);
+// Copy the Neovim engine assets alongside the worker bundle. Two sources:
+//
+//   cleanroom (default) — our first-party clean-room build in
+//     nvim-wasm-prototype/dist/, produced by the prototype pipeline.
+//   vendored (NVIM_ENGINE=vendored) — the legacy unlicensed binary fetched
+//     into vendor/nvim-wasm/ by `npm run fetch-assets`; kept as an explicit
+//     opt-in fallback until the clean-room engine has real-world mileage.
+//
+// The chosen engine is stamped into dist/chromium/engine-info.json so
+// downstream tooling (release.sh) can tell which engine landed in the build.
+const engineAssets = ["nvim-asyncify.wasm", "nvim-runtime.tar.gz"];
+const engineSources = {
+  cleanroom: {
+    dir: path.join(root, "nvim-wasm-prototype", "dist"),
+    missing: (rel) =>
+      `Missing clean-room engine asset ${rel}. Build it with:\n` +
+      "  bash nvim-wasm-prototype/scripts/build-nvim.sh\n" +
+      "  bash nvim-wasm-prototype/scripts/asyncify.sh\n" +
+      "  bash nvim-wasm-prototype/scripts/package-runtime.sh\n" +
+      "(or set NVIM_ENGINE=vendored to bundle the legacy fetched engine).",
+  },
+  vendored: {
+    dir: path.join(root, "vendor", "nvim-wasm"),
+    missing: (rel) => `Missing vendored asset ${rel}. Run \`npm run fetch-assets\` first.`,
+  },
+};
+
+const engine = process.env.NVIM_ENGINE ?? "cleanroom";
+const selected = engineSources[engine];
+if (!selected) {
+  throw new Error(
+    `Unknown NVIM_ENGINE=${engine}. Expected "cleanroom" (default) or "vendored".`,
+  );
+}
+
+const engineInfo = { source: engine, files: [] };
+for (const asset of engineAssets) {
+  const src = path.join(selected.dir, asset);
   try {
     await access(src);
   } catch {
-    throw new Error(
-      `Missing vendored asset ${path.relative(root, src)}. Run \`npm run fetch-assets\` first.`,
-    );
+    throw new Error(selected.missing(path.relative(root, src)));
   }
-  await cp(src, path.join(outDir, asset));
+  const dest = path.join(outDir, asset);
+  await cp(src, dest);
+  const bytes = (await stat(dest)).size;
+  const sha256 = createHash("sha256").update(await readFile(dest)).digest("hex");
+  engineInfo.files.push({ name: asset, bytes, sha256 });
 }
+await writeFile(path.join(outDir, "engine-info.json"), JSON.stringify(engineInfo, null, 2) + "\n");
+const totalBytes = engineInfo.files.reduce((sum, f) => sum + f.bytes, 0);
+console.log(
+  `bundled ${engine} engine (${engineInfo.files.map((f) => `${f.name} ${f.bytes}B`).join(", ")}, total ${totalBytes}B)`,
+);
 
 // Stamp the package.json version into the shipped manifest; the source
 // manifest carries a 0.0.0 placeholder so version has one source of truth.
