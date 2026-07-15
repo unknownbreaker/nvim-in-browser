@@ -103,6 +103,15 @@ client.onEvent = (method, args) => {
     if (typeof args[0] === "string") cachedFinalText = args[0];
     return;
   }
+  if (method === "clipboard_copy") {
+    // A `+`/`*` yank fired: mirror v:event.regcontents (a list of lines, each a
+    // Uint8Array or string) out to the system clipboard. Runs in both modes.
+    const lines = (args[0] as unknown[]).map(decodeLine);
+    void navigator.clipboard.writeText(lines.join("\n")).catch((e) =>
+      console.warn("[clipboard] write failed:", serializeError(e)),
+    );
+    return;
+  }
   if (method !== "wasm_text_changed") return;
   if (syncTimer !== null) clearTimeout(syncTimer);
   syncTimer = setTimeout(() => {
@@ -124,11 +133,44 @@ async function installBufferHooks(): Promise<number> {
     [
       `autocmd TextChanged,TextChangedI * call rpcnotify(${channel}, 'wasm_text_changed')`,
       `autocmd VimLeavePre * call rpcnotify(${channel}, 'wasm_text_final', join(getline(1,'$'),"\\n"))`,
+      `autocmd TextYankPost * if v:event.regname ==# '+' || v:event.regname ==# '*' | call rpcnotify(${channel}, 'clipboard_copy', v:event.regcontents) | endif`,
     ].join("\n"),
     {},
   ]);
   return channel;
 }
+
+// Pull the system clipboard into nvim's `+`/`*` registers so `"+p`/`"*p` paste
+// what the user copied elsewhere. Runs on focus/visibility (browsers only grant
+// clipboard reads to the focused document), so the registers reflect the
+// clipboard as of the last sync rather than being always-fresh. Guarded by an
+// in-flight flag so overlapping focus/visibility events don't stack requests.
+let clipboardInFlight = false;
+async function syncClipboardIn(): Promise<void> {
+  if (clipboardInFlight) return;
+  clipboardInFlight = true;
+  try {
+    let text: string;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      return; // no permission / not focused — leave registers as-is
+    }
+    const lines = text.split("\n");
+    await client.request("nvim_call_function", ["setreg", ["+", lines, "c"]]);
+    await client.request("nvim_call_function", ["setreg", ["*", lines, "c"]]);
+  } finally {
+    clipboardInFlight = false;
+  }
+}
+
+// Keep the `+`/`*` registers current whenever this frame regains focus or
+// becomes visible. Registered once; both surfaces call syncClipboardIn after
+// boot for the initial pull.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void syncClipboardIn();
+});
+window.addEventListener("focus", () => void syncClipboardIn());
 
 async function init(seedText: unknown): Promise<void> {
   await client.start(cols, rows);
@@ -137,6 +179,7 @@ async function init(seedText: unknown): Promise<void> {
     await client.request("nvim_buf_set_lines", [0, 0, -1, false, seedText.split("\n")]);
   }
   await installBufferHooks();
+  void syncClipboardIn();
   parent.postMessage({ type: "nvim-ready" }, "*");
   canvas.focus();
 }
@@ -161,6 +204,7 @@ async function startScratch(): Promise<void> {
   await client.start(cols, rows);
   debug.ready = true;
   const channel = await installBufferHooks();
+  void syncClipboardIn();
   if (saved !== null && saved.length > 0) {
     await client.request("nvim_buf_set_lines", [0, 0, -1, false, saved.split("\n")]);
     // Land the cursor at end-of-buffer so restore feels like resuming.
