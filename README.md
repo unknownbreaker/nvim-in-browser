@@ -47,3 +47,6 @@ The Neovim WASM binary and runtime archive are fetched at build time from
 has **no license**. Neovim itself is Apache-2.0. Do not make this repo or its
 release assets public until upstream licensing is resolved (tracked: open an
 issue upstream).
+
+An experimental clean-room WASM build of Neovim lives in
+nvim-wasm-prototype/ (see its README).
