@@ -1004,3 +1004,69 @@ archives built but not linked" open item.**
 - This closes the last open item on rung 9 (binary/boot-time comparison was
   already covered in the 2026-07-15 Results table above); ladder rung 9 is
   now checked off.
+
+### 2026-07-15 — Licensing Task: LGPL unibilium dropped (binary now cleanly permissive)
+
+**Why:** unibilium (a terminfo-DB parser, **LGPL-3.0**) was the sole
+non-permissively-licensed component linked into the produced wasm binary.
+It is used ONLY by `src/nvim/tui/` and every call site is behind
+`#ifdef HAVE_UNIBILIUM`, with a `#else` fallback to Neovim's in-tree
+BSD-licensed built-in terminfo tables. Our engine runs `--embed` with no
+TUI, so the parser is dead weight as well as a licensing liability.
+Removing it makes the binary cleanly permissive-licensed (no LGPL).
+
+**Flags changed (no source changes, no stubs — the official upstream knob):**
+
+- `scripts/build-nvim.sh` `configure_nvim()`: added `-DENABLE_UNIBILIUM=OFF`
+  and **removed** `-DUNIBILIUM_INCLUDE_DIR="${INC}"` /
+  `-DUNIBILIUM_LIBRARY="${LIB}/libunibilium.a"`. Neovim's
+  `option(ENABLE_UNIBILIUM "enable unibilium" ON)` gates the whole
+  dependency: with it OFF, `src/nvim/CMakeLists.txt` skips
+  `find_package(Unibilium 2.0 REQUIRED)`, does not define `HAVE_UNIBILIUM`,
+  and does not `target_link_libraries(main_lib INTERFACE unibilium)`. The
+  now-removed `UNIBILIUM_*` cache vars are only read by
+  `cmake/FindUnibilium.cmake`, which is no longer invoked.
+- `scripts/build-deps.sh`: dropped `unibilium` from `ALL_DEPS` and the
+  dispatch `case`, and deleted `build_unibilium()` entirely (replaced with a
+  short NOTE comment explaining the removal). A default
+  `bash scripts/build-deps.sh` no longer produces `libunibilium.a`. The
+  pinned `src-cache/unibilium/` source tree and its `VERSIONS.md` pin are
+  left in place (fetched from Neovim's own manifest; harmless, just no
+  longer compiled).
+
+**Rebuild (from clean):** deleted `build/nvim/bin/nvim`,
+`build/deps/lib/libunibilium.a`, and `build/deps/lib/libuv.a` (force full
+relink), then ran `build-deps.sh` (confirmed: static-libs list has NO
+`libunibilium.a`; unibilium step gone), `build-nvim.sh`, `asyncify.sh`,
+`package-runtime.sh`. The nvim link completed with **no undefined-symbol
+errors** (the TUI's `#else` built-in-terminfo path compiles and links
+without unibilium) — a successful link is the proof, and `[206/207]
+Linking C executable bin/nvim` finished clean.
+
+**Symbol-gone proof:**
+`.toolchain/wasi-sdk/bin/llvm-nm build/nvim/bin/nvim` → 8535 symbols, of
+which `grep -ic unibi` = **0** (no `unibi_*` symbols, defined or undefined,
+case-insensitive).
+
+**Gates (all green):**
+
+- `bash scripts/smoke.sh` → **SMOKE PASS** + **PARITY PASS 4/4**
+  (progpath, print_safe, **treesitter all 7 grammars / `translation_unit`
+  parse**, io_write_safe). Treesitter unaffected, as expected — it never
+  depended on unibilium. Idle gate held (2 wake-ups over 10 s, final 5 s
+  sample 0.00/s ≤ 5/s).
+- `bash test/uv-smoke.sh` → link-all + case A-immediate + case B-delayed all
+  green.
+
+**Size delta (modest shrink, as expected — unibilium is small):**
+
+| artifact | before | after | delta |
+| --- | --- | --- | --- |
+| `build/nvim/bin/nvim` (pre-asyncify) | 9,168,111 B | 9,159,654 B | −8,457 B |
+| `dist/nvim-asyncify.wasm` | 10,825,005 B | 10,813,396 B | −11,609 B |
+
+Runtime tarball unchanged (5,742,514 B, 2,186 entries).
+
+**Result: the produced binary no longer links any LGPL-licensed code — it
+is now cleanly permissive-licensed.** This does not change the `--embed`
+headless behavior in any way (unibilium was TUI-only, and we run no TUI).
