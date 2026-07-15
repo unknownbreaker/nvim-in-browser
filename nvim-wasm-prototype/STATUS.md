@@ -500,7 +500,7 @@ complete list of real blockers, and all were fixed before first boot.
 | asyncified wasm | 8,040,769 B | 8,386,869 B (ours 4.1% smaller) |
 | pre-asyncify link | 5,983,520 B (-O3, was 5,983,467 before the asyncify-scratch exports) | n/a |
 | runtime tarball | 5,742,514 B (2,186 entries, full runtime/ tree) | 5,613,852 B |
-| boot ("loaded wasm" → "nvim booted", i.e. compile+instantiate+init to first poll park) | ~131 ms | (not re-measured) |
+| boot ("loaded wasm" → "nvim booted") | not instrumented — `smoke-nvim.mjs` logs no timestamp on either line; both engines feel sub-second in manual testing but there is no logged number to report | not instrumented |
 | idle wake-ups | 2 over 10 s = **0.20/s**; final 5s stat sample **0.00/s** (gate ≤5/s) | ~1/s (needs the host's adaptive backoff) |
 | post-idle input latency | 2–15 ms per `nvim_input` round-trip | ~ms (comparable) |
 | total wake-ups boot→post-edit→idle | 6 | — |

@@ -99,7 +99,12 @@ idle-CPU gate.
 | Asyncified binary | 8,040,769 B | 8,386,869 B |
 | Runtime tarball | 5,742,514 B | 5,613,852 B |
 | Idle poll wakeups (final 5s sample) | 0.00/s | 1/s (needs host backoff) |
-| Boot to RPC-ready | ~50–130 ms | ~300 ms |
+
+Boot feel: both engines boot and answer `nvim_ui_attach` in well under a
+second in manual testing, but `scripts/smoke-nvim.mjs` logs no timestamp
+between "loaded wasm" and "nvim booted" (its only `ms` timings are the
+post-idle `nvim_input` round-trips below), so there is no instrumented
+boot-time comparison to report here.
 
 Notably, idle is *better* than the vendored engine: our libuv shim subscribes
 `fd_read` on stdin in `poll_oneoff`, so the host's adaptive-backoff workaround

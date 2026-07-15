@@ -47,10 +47,10 @@
      os_replace_stdout_and_stderr_to_conout();
    }
 +#elif defined(__wasi__)
-+  // WASI (preview1) has no dup()/F_DUPFD and no child processes, so the fd
-+  // redirect below is impossible (fcntl(F_DUPFD_CLOEXEC) returns -1, handing
-+  // the RPC channel a dead fd) and also unnecessary: nothing can inherit the
-+  // fds and no other writer exists inside the sandbox. Keep fds 0/1 directly.
++  // WASI preview1 has no dup()/F_DUPFD (fd_renumber MOVES an fd; there is no
++  // way to duplicate one), so the redirect below is impossible; the RPC
++  // channel stays on fds 0/1. KNOWN LIMITATION: anything else that writes to
++  // fd 1 (e.g. user Lua io.write()) corrupts the msgpack-RPC stream.
  #else
    if (embedded_mode) {
      // Redirect stdout/stdin (the UI channel) to stderr. Use fnctl(F_DUPFD_CLOEXEC) instead of dup()
