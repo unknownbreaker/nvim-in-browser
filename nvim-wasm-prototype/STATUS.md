@@ -13,15 +13,23 @@ failed experiments get recorded, not erased.
 - [x] 6. `--embed` handshake: answers `nvim_ui_attach`.
 - [x] 7. Buffer edit round-trip via RPC.
 - [x] 8. Full `smoke-nvim.mjs` PASS including idle-wakeups gate. **(Definition of done)**
-- [ ] 9. Stretch: overlay/browser smokes against our binary; compare binary
+- [x] 9. Stretch: overlay/browser smokes against our binary; compare binary
       size and boot time vs vendored.
       **Progress (2026-07-15, parity-gaps Task 4):** the three parity gaps
       (progpath, io.write RPC safety, static tree-sitter) are closed and
       `scripts/smoke.sh` now runs `test/parity-check.mjs` immediately after
       the parent smoke harness passes, so PARITY PASS is part of the
-      standing rung-8+ gate, not a separate manual step. Browser/overlay
-      smokes against our binary (and the size/boot-time comparison) remain
-      the only unchecked stretch item.
+      standing rung-8+ gate, not a separate manual step.
+      **Closed (2026-07-15, engine-swap Task 2):** `scripts/build.mjs` in the
+      parent repo now defaults to this build (`dist/nvim-asyncify.wasm` +
+      `dist/nvim-runtime.tar.gz`), and both parent browser smokes pass
+      against it: `node scripts/browser-smoke.mjs` boots our engine in real
+      Chrome in 0.3s and settles to 0 idle poll wakeups/sec (gate ≤5/s);
+      `node scripts/overlay-smoke.mjs` passes every stage against our
+      engine — textarea activation/positioning, debounced live sync,
+      deactivate with final sync, single-line `<input>` sync, password-field
+      no-op, and `:q` final-sync via `VimLeavePre` — plus the production
+      dead-code check. Rung 9 is now fully closed.
 
 ## Log
 
@@ -975,3 +983,24 @@ archives built but not linked" open item.**
   the accidental `io.write()` footgun (fixed), this requires explicit
   intent and is indistinguishable from it — accepted residual, revisit only
   if hostile-config isolation ever becomes a goal.
+
+### 2026-07-15 — engine-swap Task 2: rung 9 closed (browser + overlay smokes)
+
+- The parent repo's `scripts/build.mjs` now defaults to this build (Task 1
+  of the engine-swap plan, commit 3ace6e9): `dist/chromium` is assembled
+  from `nvim-wasm-prototype/dist/nvim-asyncify.wasm` +
+  `dist/nvim-runtime.tar.gz` unless `NVIM_ENGINE=vendored` is set.
+- `node scripts/browser-smoke.mjs` (parent repo, real Chrome for Testing,
+  against the clean-room dist): engine ready in **0.3s**; buffer round-trip
+  assertion OK; idle-wakeup samples `[0.8, 0]`, last sample **0/s** (gate
+  ≤5/s) — confirms the fd_read stdin subscription keeps the host's adaptive
+  backoff inert for real, not just in the Node smoke harness.
+- `node scripts/overlay-smoke.mjs` (parent repo, same dist): every stage
+  PASS against our engine — textarea activation + overlay positioning,
+  debounced live sync + synthetic input event, deactivate with final sync
+  and iframe teardown, single-line `<input>` sync, password-field no-op,
+  and `:q` final-sync via `VimLeavePre` — plus the production dead-code
+  check (test-only activation hook compiles out under esbuild `define`).
+- This closes the last open item on rung 9 (binary/boot-time comparison was
+  already covered in the 2026-07-15 Results table above); ladder rung 9 is
+  now checked off.

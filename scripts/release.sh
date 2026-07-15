@@ -37,15 +37,9 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$BUMP" ]] || usage 1
 
-for cmd in git gh node npm zip; do
+for cmd in git gh node npm zip jq; do
   command -v "$cmd" >/dev/null 2>&1 || die "missing required command: $cmd"
 done
-
-# The built dist embeds the unlicensed nvim-wasm engine binaries, so any release
-# would attach them. Refuse to run unless explicitly overridden.
-if [[ "${ALLOW_UNLICENSED_ENGINE:-}" != "1" ]]; then
-  die "dist embeds nvim-wasm engine assets with no upstream license (see README 'Third-party engine'); repo+releases must stay private. Set ALLOW_UNLICENSED_ENGINE=1 to proceed."
-fi
 
 if [[ "$DRY_RUN" == false ]]; then
   gh auth status --hostname github.com >/dev/null 2>&1 || die "gh is not authenticated for github.com (run: gh auth login)"
@@ -75,6 +69,25 @@ fi
 npm ci
 npm run build
 [[ -f dist/chromium/manifest.json ]] || { restore_bump; die "build did not produce dist/chromium/manifest.json"; }
+
+# The build stamps dist/chromium/engine-info.json with which engine landed.
+# The vendored nvim-wasm engine has no upstream license, so releases embedding
+# it must stay private-repo unless explicitly overridden. The first-party
+# clean-room engine (default) carries no such restriction.
+ENGINE_INFO="dist/chromium/engine-info.json"
+[[ -f "$ENGINE_INFO" ]] || { restore_bump; die "build did not produce $ENGINE_INFO"; }
+ENGINE_SOURCE="$(jq -r '.source' "$ENGINE_INFO" 2>/dev/null)" || { restore_bump; die "could not read .source from $ENGINE_INFO (malformed?)"; }
+# Fail closed: proceed only for the known-clean first-party engine. Any other
+# value — "vendored", "null" from a missing key, or a typo — requires the
+# explicit unlicensed-engine override, since this is a legal gate.
+if [[ "$ENGINE_SOURCE" == "cleanroom" ]]; then
+  log "first-party clean-room engine — no license gate"
+elif [[ "${ALLOW_UNLICENSED_ENGINE:-}" == "1" ]]; then
+  log "engine source '$ENGINE_SOURCE' — ALLOW_UNLICENSED_ENGINE=1 override honored"
+else
+  restore_bump
+  die "engine source '$ENGINE_SOURCE' is not the license-clean first-party build (see README 'Engine'); repo+releases must stay private. Set ALLOW_UNLICENSED_ENGINE=1 to proceed."
+fi
 
 ZIP_LATEST="dist/nvim-in-browser-chromium.zip"
 ZIP_VERSIONED="dist/nvim-in-browser-chromium-$VERSION.zip"
