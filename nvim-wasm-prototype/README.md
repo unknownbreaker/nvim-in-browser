@@ -50,17 +50,39 @@ nvim-wasm-prototype/
   scripts/
     fetch-toolchain.sh # wasi-sdk + binaryen -> .toolchain/ (pinned, SHA-checked)
     env.sh             # sourceable env exporting PROTO_ROOT, WASI_SDK, WASM_OPT
+    fetch-sources.sh   # neovim + dep sources -> src-cache/ (pinned, SHA-checked)
+    build-deps.sh      # dep archives -> build/deps/lib + host lua -> build/host
+    build-nvim.sh      # patch + configure + link nvim -> build/nvim/bin/nvim
+    asyncify.sh        # wasm-opt --asyncify -> dist/nvim-asyncify.wasm
+    package-runtime.sh # runtime/ tree -> dist/nvim-runtime.tar.gz (plain ustar)
+    smoke.sh           # rung-8 gate: parent smoke harness vs dist/ artifacts
+    wasi-toolchain.cmake
+  shims/               # clean-room libuv/nvim WASI shim layer (see STATUS.md)
+  patches/             # provenance-headered patches (lua, libuv, nvim embed-stdio)
   test/
     hello.c            # rung-1 smoke test: wasm32-wasi hello world
-    run-wasi.mjs        # Node runner for .wasm binaries via node:wasi
+    run-wasi.mjs       # Node runner for .wasm binaries via node:wasi
+    uv-smoke.{c,sh} uv-linkall.c   # rung-3 libuv gate
+    check-module.mjs   # rung-4 gate: module compiles, _start+memory exported
+    check-asyncify.mjs # rung-5 gate: asyncify ABI + scratch-helper exports
   .toolchain/ build/ src-cache/ dist/   # all gitignored, produced by scripts
 ```
 
 ## Usage
 
+Full pipeline (each script is idempotent/resumable):
+
 ```sh
-source scripts/env.sh
-scripts/fetch-toolchain.sh
-"$WASI_SDK/bin/clang" --target=wasm32-wasi -O2 -o build/hello.wasm test/hello.c
-node test/run-wasi.mjs build/hello.wasm
+bash scripts/fetch-toolchain.sh    # wasi-sdk 33 + binaryen 130
+bash scripts/fetch-sources.sh     # neovim v0.12.4 + pinned deps
+bash scripts/build-deps.sh        # 13 wasm archives + host lua
+bash scripts/build-nvim.sh        # build/nvim/bin/nvim (wasm32-wasi)
+bash scripts/asyncify.sh          # dist/nvim-asyncify.wasm
+bash scripts/package-runtime.sh   # dist/nvim-runtime.tar.gz
+bash scripts/smoke.sh             # rung-8 gate: parent smoke-nvim.mjs -> SMOKE PASS
 ```
+
+`scripts/smoke.sh` points the parent repo's real harness
+(`../scripts/smoke-nvim.mjs`) at the two `dist/` artifacts via
+`NVIM_WASM_PATH`/`NVIM_RUNTIME_PATH`; PASS includes the idle-wakeups
+assertion (final sample ≤5/s; this build measures ~0/s idle).

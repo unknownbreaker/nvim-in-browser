@@ -9,10 +9,10 @@ failed experiments get recorded, not erased.
 - [x] 2. Leaf deps compile (utf8proc, treesitter, lua 5.1, …). Host lua/luac built.
 - [x] 3. libuv compiles against our shim layer (links, symbols resolved).
 - [x] 4. Neovim objects compile; binary links.
-- [ ] 5. `_start` reaches first `poll_oneoff` under the parent engine host.
-- [ ] 6. `--embed` handshake: answers `nvim_ui_attach`.
-- [ ] 7. Buffer edit round-trip via RPC.
-- [ ] 8. Full `smoke-nvim.mjs` PASS including idle-wakeups gate. **(Definition of done)**
+- [x] 5. `_start` reaches first `poll_oneoff` under the parent engine host.
+- [x] 6. `--embed` handshake: answers `nvim_ui_attach`.
+- [x] 7. Buffer edit round-trip via RPC.
+- [x] 8. Full `smoke-nvim.mjs` PASS including idle-wakeups gate. **(Definition of done)**
 - [ ] 9. Stretch: overlay/browser smokes against our binary; compare binary
       size and boot time vs vendored.
 
@@ -482,3 +482,103 @@ only (never `nvim`/`all` — runtime/doc targets want to RUN the binary).
   the EH instructions fine (proven by the gate + the --version run).
   Whether the sjlj paths *behave* under load is first exercised when real
   Lua/pcall traffic runs — rung 5+.
+
+### 2026-07-15 — Task 7: rungs 5–8 — SMOKE PASS (definition of done)
+
+**Gate green:** `bash scripts/smoke.sh` (wraps the PARENT repo's real
+`scripts/smoke-nvim.mjs` with `NVIM_WASM_PATH`/`NVIM_RUNTIME_PATH` pointing
+at our `dist/` artifacts) prints **SMOKE PASS**: boots, `nvim_ui_attach` →
+null (success), `ihello` → buffer `["hello"]`, idle-wakeups assertion
+passes, post-idle `oworld` → `["hello","world"]`. All four rungs cleared
+on the FIRST full smoke run — the rung-4 risk list turned out to be the
+complete list of real blockers, and all were fixed before first boot.
+
+**Metrics (vs vendored engine):**
+
+| metric | ours | vendored |
+| --- | --- | --- |
+| asyncified wasm | 8,040,769 B | 8,386,869 B (ours 4.1% smaller) |
+| pre-asyncify link | 5,983,520 B (-O3, was 5,983,467 before the asyncify-scratch exports) | n/a |
+| runtime tarball | 5,742,514 B (2,186 entries, full runtime/ tree) | 5,613,852 B |
+| boot ("loaded wasm" → "nvim booted", i.e. compile+instantiate+init to first poll park) | ~131 ms | (not re-measured) |
+| idle wake-ups | 2 over 10 s = **0.20/s**; final 5s stat sample **0.00/s** (gate ≤5/s) | ~1/s (needs the host's adaptive backoff) |
+| post-idle input latency | 2–15 ms per `nvim_input` round-trip | ~ms (comparable) |
+| total wake-ups boot→post-edit→idle | 6 | — |
+
+**The idle number is the designed-in rung-3 result confirmed:** our libuv
+poll core subscribes `fd_read` on stdin, so idle nvim parks in
+`poll_oneoff` on an fd subscription with NO repeating clock churn — the
+parent host's `waitFor` sees `hasFdSub` and never even engages its
+adaptive backoff (that backoff exists solely because the vendored build
+busy-polls stdin with ~1ms clock-only subscriptions). Genuinely
+event-driven idle: 0 wakeups in the final 5-second window.
+
+**What each rung needed:**
+
+- **Rung 5 blocker #1 (predicted): parent host asyncify-scratch discovery.**
+  The task brief said the host falls back to `memory.grow`; reading
+  `src/engine/nvim-host.ts` (ours, allowed) showed otherwise — it
+  *unconditionally* calls `nvim_asyncify_get_data_ptr()` /
+  `_get_stack_start()` / `_get_stack_end()` at boot. New
+  `shims/nvim-wasi-asyncify.c`: 8-byte [current,end] descriptor + 4 MiB
+  .bss unwind stack, three `__attribute__((export_name))` getters. Linked
+  as a BARE OBJECT via `CMAKE_C_STANDARD_LIBRARIES` (an archive member
+  nothing references would be silently dropped and the exports would
+  vanish).
+- **Rung 5/6 blocker #2 (predicted, THE rung-4 carry-forward): channel.c
+  --embed stdio redirect.** `fcntl(F_DUPFD_CLOEXEC)` has no WASI
+  implementation (preview1 `fd_renumber` MOVES, nothing dups), so the RPC
+  channel got fd −1. Fix: **the port's first genuine Neovim patch**,
+  `patches/neovim-embed-stdio.patch` — a new `#elif defined(__wasi__)`
+  branch in `channel_from_stdio()` that keeps fds 0/1 directly. The
+  redirect's two purposes (hide RPC fds from child processes; shield the
+  RPC stream from stray stdout writers) are both moot inside preview1.
+  Honest-shim alternatives were examined and rejected: faking dup would
+  require intercepting every subsequent fd op at the libc boundary.
+  Applied by a new idempotent `patch` step in build-nvim.sh (grep-guarded,
+  in-place on src-cache/neovim).
+- **Rung 5 asyncify itself:** `scripts/asyncify.sh` = `wasm-opt -O2
+  --asyncify --pass-arg=asyncify-imports@wasi_snapshot_preview1.poll_oneoff`
+  (flags verified against binaryen-130 `--help`). **The feared
+  sjlj/EH-vs-asyncify wall never materialized:** binaryen 130 read the
+  module's own target_features section (exception handling included),
+  instrumented, and finished in ~6 s wall / 42 s CPU with no explicit
+  `--enable-*` flags. Gate: `test/check-asyncify.mjs` asserts the full
+  export surface the host dereferences (asyncify ABI ×5 + scratch helpers
+  ×3 + _start + memory).
+- **Rungs 6–8 runtime packaging:** `scripts/package-runtime.sh` tars the
+  pinned source `runtime/` tree (26 MB, no symlinks, nothing build-time
+  generated is needed for the embedded RPC path). Layout verified against
+  the parent's OWN code: nvim-host.ts mounts tarball entries at the "/"
+  preopen and sets `VIMRUNTIME=/runtime` (NOT `/nvim/runtime` as the task
+  brief claimed) → tarball has one top-level `runtime/` dir. Parent's
+  untar.ts skips pax/GNU-longname records, so `tar --format=ustar` (plain
+  ustar; errors loudly if a path can't be represented) +
+  `COPYFILE_DISABLE=1` (no macOS AppleDouble entries) + `.DS_Store`
+  excluded; verify step asserts every entry starts with `runtime/`.
+- **build-nvim.sh staleness fixes (iteration ergonomics):** configure now
+  re-runs when build-nvim.sh itself is newer than build.ninja; build now
+  force-relinks when any build/deps/lib archive/object is newer than
+  bin/nvim (ninja doesn't track CMAKE_C_STANDARD_LIBRARIES inputs), then
+  always runs ninja (no-op when clean). Closes the rung-4 "stale-binary
+  skip if shims edited" carry-forward.
+
+**Incidental discoveries:**
+
+- The host presents stdio as FILETYPE_CHARACTER_DEVICE with
+  FDFLAGS_NONBLOCK already set and read-only/write-only rights, so
+  wasi-libc `isatty(0)` is true → nvim's `stream_init` takes the
+  `uv_pipe_open` path (non-MSWIN treats UV_TTY the same as pipe) and
+  upstream `uv__nonblock_fcntl` sees O_NONBLOCK already set — no
+  `fd_fdstat_set_flags` support needed from the host shim.
+- asyncify growth: 5,983,520 → 8,040,769 B (+34%), still under the
+  vendored binary. `-O2` (before --asyncify, per command-line pass order)
+  is doing real work here.
+- The smoke harness runs the engine over `@bjorn3/browser_wasi_shim`, not
+  `node:wasi` — rungs 1–4 proved the binary under uvwasi, rung 5+ under
+  the browser shim; both substrates now boot the same module.
+
+**Still open (rung 9 / stretch, unchanged):** tree-sitter parser archives
+built but not linked (upstream dlopens; `vim.treesitter` parsers absent);
+`uv_exepath` ENOSYS → `v:progpath` empty (harmless for the smoke path);
+browser/overlay smokes against our binary not yet run.
