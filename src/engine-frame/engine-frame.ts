@@ -156,9 +156,21 @@ async function syncClipboardIn(): Promise<void> {
     } catch {
       return; // no permission / not focused — leave registers as-is
     }
-    const lines = text.split("\n");
-    await client.request("nvim_call_function", ["setreg", ["+", lines, "c"]]);
-    await client.request("nvim_call_function", ["setreg", ["*", lines, "c"]]);
+    // Normalize CRLF to LF, and treat a trailing newline as "linewise" (a
+    // whole-line copy) rather than leaving a spurious blank element from
+    // split("\n") — "hello\nworld\n".split("\n") is ["hello","world",""].
+    const normalized = text.replace(/\r\n/g, "\n");
+    if (normalized === "") return;
+    const linewise = normalized.endsWith("\n");
+    const body = linewise ? normalized.slice(0, -1) : normalized;
+    const lines = body.split("\n");
+    const regtype = linewise ? "l" : "c";
+    try {
+      await client.request("nvim_call_function", ["setreg", ["+", lines, regtype]]);
+      await client.request("nvim_call_function", ["setreg", ["*", lines, regtype]]);
+    } catch (e) {
+      console.warn("[clipboard] setreg failed:", serializeError(e));
+    }
   } finally {
     clipboardInFlight = false;
   }
