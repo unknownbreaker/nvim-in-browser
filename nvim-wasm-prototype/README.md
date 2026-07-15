@@ -86,3 +86,41 @@ bash scripts/smoke.sh             # rung-8 gate: parent smoke-nvim.mjs -> SMOKE 
 (`../scripts/smoke-nvim.mjs`) at the two `dist/` artifacts via
 `NVIM_WASM_PATH`/`NVIM_RUNTIME_PATH`; PASS includes the idle-wakeups
 assertion (final sample ≤5/s; this build measures ~0/s idle).
+
+## Results (2026-07-15)
+
+**The ladder was climbed to rung 8: the clean-room binary passes the parent
+repo's full smoke harness** — boots under the unmodified engine host, answers
+`nvim_ui_attach`, round-trips buffer edits over msgpack-RPC, and beats the
+idle-CPU gate.
+
+| Metric | Clean-room build | Vendored (nvim-wasm) |
+|---|---|---|
+| Asyncified binary | 8,040,769 B | 8,386,869 B |
+| Runtime tarball | 5,742,514 B | 5,613,852 B |
+| Idle poll wakeups (final 5s sample) | 0.00/s | 1/s (needs host backoff) |
+| Boot to RPC-ready | ~50–130 ms | ~300 ms |
+
+Notably, idle is *better* than the vendored engine: our libuv shim subscribes
+`fd_read` on stdin in `poll_oneoff`, so the host's adaptive-backoff workaround
+never engages — idle is genuinely event-driven.
+
+**Patch inventory** (everything else is unmodified upstream source):
+
+- `patches/lua51-wasi.patch` — Lua 5.1 `luaconf.h` tmpnam guard for wasi-libc
+- `patches/libuv-wasi.patch` — 3 build-system hunks; the real work is the
+  clean-room shim layer in `shims/` (poll_oneoff-backed `uv__io_poll`,
+  fd-less `uv_async`, inline threadpool, honest ENOSYS stubs)
+- `patches/neovim-embed-stdio.patch` — the single Neovim source patch:
+  `#elif defined(__wasi__)` keeps RPC on fds 0/1 (preview1 has no dup)
+
+**What an engine swap would take:** the parent host runs this binary
+unchanged (same argv/env/preopens/Asyncify ABI, incl. the
+`nvim_asyncify_get_*` scratch exports). Remaining parity gaps before
+replacing the vendored engine: tree-sitter parser archives are built but not
+linked (`vim.treesitter` highlight unavailable), `uv_exepath` is ENOSYS
+(`v:progpath` empty), and — most important before user configs run — user
+Lua `io.write()` writes to fd 1 and corrupts the RPC stream (upstream's
+stdio redirect is unimplementable under preview1; a Lua-level
+`io.write`/`io.stdout` redirect is required). Full open-items list in
+`STATUS.md`.

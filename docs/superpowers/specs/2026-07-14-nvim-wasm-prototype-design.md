@@ -1,7 +1,9 @@
 # nvim-wasm-prototype — Design Spec
 
 **Date:** 2026-07-14
-**Status:** Approved design, pre-implementation
+**Status:** ✅ Implemented 2026-07-15 — rung 8 achieved: the clean-room binary
+passes the parent smoke harness (see `nvim-wasm-prototype/README.md` Results
+and `STATUS.md` for metrics, patch inventory, and open items)
 **Parent project:** nvim-in-browser (see 2026-07-14-nvim-in-browser-design.md)
 
 ## Overview
