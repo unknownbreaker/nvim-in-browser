@@ -675,3 +675,108 @@ Relinked `bin/nvim` = 5,983,592 B; asyncified `dist/nvim-asyncify.wasm` =
 **Still open (unchanged):** the user-Lua `io.write` RPC-corruption known
 limitation above; tree-sitter parser archives built but not linked;
 browser/overlay smokes not yet run.
+
+### 2026-07-15 — Parity Task 2: user Lua io.write()/io.stdout diverted off the RPC fd
+
+**Mechanism decision (investigated BEFORE coding, per the task brief):**
+
+Two candidate mechanisms, in the brief's preference order:
+
+- **(a) C stdio retarget — REJECTED as unviable.** The idea: RPC writes go
+  to fd 1 as *raw uv fd writes* (`uv__io_poll`/`uv_write` on a `uv_pipe`
+  wrapping fd 1) while Lua's `io` library writes through C stdio
+  `FILE *stdout` — so retargeting the `FILE` to fd 2 early in embedded
+  startup would divert every C-stdio stdout writer (Lua io included)
+  without touching the RPC path. Investigation against the pinned
+  wasi-sdk-33 sysroot killed every variant:
+  - `stdout = stderr;` — impossible: wasi-libc's `stdio.h` declares
+    `extern FILE *const stdout;` (const *pointer*; reassignment is a
+    compile error).
+  - Poking the FILE's internal fd field — impossible without internal
+    headers: on WASI, `FILE` is deliberately an **incomplete type**
+    (the sysroot `stdio.h` only defines `struct _IO_FILE` under
+    `__wasilibc_unmodified_upstream`, which is never set for consumers),
+    and musl's internal `stdio_impl.h` is **not shipped anywhere** in the
+    SDK (verified: `find .toolchain/wasi-sdk -name stdio_impl.h` → no
+    matches). Replicating musl's private FILE layout in our own code
+    would couple us to an unversioned internal ABI — rejected as fragile.
+  - `freopen(path, "w", stdout)` — needs a *path*; the sandbox has no
+    `/dev/stderr`/`/dev/fd/2`, so the best it could do is divert stdout
+    into a preopen *file* nobody watches, not stderr.
+  - `fd_renumber` tricks — a non-starter: preview1 `fd_renumber` MOVES an
+    fd (would tear down the RPC channel's fd 1), it cannot alias one.
+- **(b) Lua-level redirect at init — CHOSEN.** New minimal patch
+  `patches/neovim-lua-stdio.patch`: in `nlua_init()`
+  (`src/nvim/lua/executor.c`), immediately after `luaL_openlibs()`, run
+  (under `#ifdef __wasi__`) the chunk
+  `io.output(io.stderr) io.stdout = io.stderr`, and `os_exit(1)` loudly if
+  that chunk somehow fails. Why this exact chunk (verified against pinned
+  Lua 5.1.5 `liolib.c`):
+  - `io.write` is `g_write(L, getiofile(L, IO_OUTPUT))` — it writes to the
+    **default output**, not to the `io.stdout` field; `io.output(io.stderr)`
+    is the documented API for retargeting the default output, so it fixes
+    `io.write(...)` outright.
+  - `io.stdout = io.stderr` additionally catches explicit
+    `io.stdout:write(...)` (the field is just a table slot).
+  - The brief's suggested extra `io.write = function(...) return
+    io.stderr:write(...) end` wrapper was deliberately **dropped**: it
+    would pin `io.write` to stderr forever, silently breaking the
+    legitimate pattern `io.output(somefile); io.write(...)` that plugins
+    use to write files. With the default output already retargeted, the
+    wrapper adds no protection (the only stdout-reaching route left would
+    be the real stdout FILE handle, which is no longer reachable from user
+    Lua: `io.stdout` now names stderr and WASI has no `/dev/stdout` to
+    reopen).
+  - Injection point rationale: `nlua_init()` is the constructor of the
+    single embedded main-thread Lua state, and `luaL_openlibs()` is where
+    the `io` table is born — no user Lua (or runtime Lua) can run before
+    this point. Thread states (`nlua_init_state`) are unreachable under
+    WASI (`uv_thread_create` = ENOSYS), and `nvim -l` script states are
+    not the embedded RPC path, so patching `nlua_init` alone is both
+    sufficient and minimal.
+  - `print()` needs no fix: nvim replaces the global `print` with
+    `nlua_print` (routes through the message system, never fd 1) —
+    verified in `executor.c` and covered by the new `print_safe` baseline
+    parity check.
+
+**Failing-first evidence (checks added BEFORE the fix, run against the
+then-current dist):** two new checks appended to `test/parity-check.mjs`
+(which also grew a `ctx` second argument for checks: a per-request timeout
+helper + captured-stderr access, and the runner now records nvim's stderr):
+
+- `print_safe` (baseline): `nvim_exec_lua("print('x') return 2")` then
+  `nvim_eval("2+2")`, each under a 2 s timeout — **PASSed pre-fix**, as
+  predicted (print never touches fd 1).
+- `io_write_safe`: `nvim_exec_lua("io.write(string.char(0xdc,0x00,0x10))
+  return 1")` (the exact 3-byte sequence proven fatal in Task 7 — a bare
+  msgpack array16 header) then `nvim_eval("1+1")` under a 2 s timeout.
+  Pre-fix: `FAIL io_write_safe: RPC stream dead after 3 bytes of
+  io.write(): timeout after 2000ms waiting for nvim_eval("1+1") after
+  io.write` → `PARITY FAIL` exit 1, with the harness reporting the timeout
+  gracefully instead of hanging. The check is deliberately LAST in the
+  CHECKS array: against an unfixed build it kills the RPC session, so
+  anything after it would fail spuriously. It also asserts (post-fix) that
+  the three junk bytes actually LANDED on stderr — diverted, not
+  swallowed — and it fires the exec_lua without awaiting it first, since on
+  an unfixed build even that response is eaten by the desynced framing.
+
+**Post-fix result:** `patches/neovim-lua-stdio.patch` applied by a new
+per-patch guard loop in `build-nvim.sh` (`apply_one_patch`, grep-guarded
+and idempotent like before); rebuild + `asyncify.sh` → relinked `bin/nvim`
+5,983,839 B, `dist/nvim-asyncify.wasm` 8,041,186 B. Parity run: all three
+checks PASS (`io.write junk diverted to stderr; RPC intact (exec_lua -> 1,
+eval 1+1 -> 2)`; the 0xdc 0x00 0x10 bytes visibly arrive on the stderr
+capture) → **PARITY PASS**. Full regression: `bash scripts/smoke.sh` →
+**SMOKE PASS** (idle wake-ups 0.00/s, post-idle edit OK); `bash
+test/uv-smoke.sh` → link-all + case A/B green. Docs updated:
+`neovim-embed-stdio.patch` header (limitation → resolved, pointing at the
+companion patch) plus the in-tree channel.c comment re-synced, README patch
+inventory + engine-swap paragraph (io.write gap closed, progpath gap from
+Parity Task 1 also reflected). **This closes the Task-7 "KNOWN LIMITATION —
+user Lua io.write()/io.stdout corrupts the RPC stream" open item.** The
+remaining theoretical hole — a non-Lua C-level stdout writer inside nvim —
+is documented in the patch header; nothing in the embedded headless path
+writes to C stdout.
+
+**Still open (unchanged):** tree-sitter parser archives built but not
+linked; browser/overlay smokes not yet run.

@@ -116,16 +116,21 @@ never engages — idle is genuinely event-driven.
 - `patches/libuv-wasi.patch` — 3 build-system hunks; the real work is the
   clean-room shim layer in `shims/` (poll_oneoff-backed `uv__io_poll`,
   fd-less `uv_async`, inline threadpool, honest ENOSYS stubs)
-- `patches/neovim-embed-stdio.patch` — the single Neovim source patch:
-  `#elif defined(__wasi__)` keeps RPC on fds 0/1 (preview1 has no dup)
+- `patches/neovim-embed-stdio.patch` — `#elif defined(__wasi__)` keeps RPC
+  on fds 0/1 (preview1 has no dup)
+- `patches/neovim-lua-stdio.patch` — companion to the above: `nlua_init()`
+  diverts Lua's default io output + `io.stdout` to stderr under `__wasi__`,
+  so user Lua `io.write()`/`io.stdout:write()` cannot corrupt the RPC
+  stream on fd 1
 
 **What an engine swap would take:** the parent host runs this binary
 unchanged (same argv/env/preopens/Asyncify ABI, incl. the
-`nvim_asyncify_get_*` scratch exports). Remaining parity gaps before
-replacing the vendored engine: tree-sitter parser archives are built but not
-linked (`vim.treesitter` highlight unavailable), `uv_exepath` is ENOSYS
-(`v:progpath` empty), and — most important before user configs run — user
-Lua `io.write()` writes to fd 1 and corrupts the RPC stream (upstream's
-stdio redirect is unimplementable under preview1; a Lua-level
-`io.write`/`io.stdout` redirect is required). Full open-items list in
-`STATUS.md`.
+`nvim_asyncify_get_*` scratch exports). Two former blockers are closed and
+gated by `test/parity-check.mjs`: `uv_exepath` now returns a synthetic
+absolute path (`v:progpath` populated — `progpath` check), and user Lua
+`io.write()`/`io.stdout` no longer reaches the RPC fd (upstream's stdio
+redirect is unimplementable under preview1, so `nlua_init()` diverts Lua's
+io output to stderr — `io_write_safe`/`print_safe` checks). Remaining
+parity gap before replacing the vendored engine: tree-sitter parser
+archives are built but not linked (`vim.treesitter` highlight unavailable).
+Full open-items list in `STATUS.md`.

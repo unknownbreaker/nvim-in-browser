@@ -14,20 +14,22 @@
 # keeping fds 0/1 as the channel endpoints is the only option available —
 # not a judgment call that the redirect's purposes don't apply here.
 #
-# KNOWN LIMITATION (do not remove this note without re-verifying): purpose
-# (b) above is NOT moot inside the sandbox. It was empirically disproved —
-# a user Lua `io.write()` call writes straight to fd 1, and 3 bytes of
+# PURPOSE (b) — RESOLVED by the companion patches/neovim-lua-stdio.patch:
+# purpose (b) above is NOT moot inside the sandbox (empirically disproved —
+# a user Lua `io.write()` call wrote straight to fd 1, and 3 bytes of
 # io.write() output permanently desynced the msgpack-RPC framing and killed
-# the RPC session in testing. Purpose (a) (hiding the fds from child
-# processes) is genuinely moot — preview1 has no child processes — but (b)
-# is real and unaddressed by this patch. This is still an ACCEPTABLE gap
-# for the current prototype gate, which runs nvim -u NORC --noplugin (no
-# user Lua ever executes). It becomes a hard blocker before any milestone
-# that runs user configs: a Lua-level redirect of `io.write`/`io.stdout`
-# (and `print`, which routes through them) to stderr, or to a host-provided
-# sink, must be installed before user Lua can run. A new #elif
-# defined(__wasi__) branch keeps fds 0/1 as the channel endpoints, which is
-# exactly what the wasm host wires up.
+# the RPC session in testing). Purpose (a) (hiding the fds from child
+# processes) IS genuinely moot — preview1 has no child processes. The (b)
+# gap is now closed at the Lua level: neovim-lua-stdio.patch diverts Lua's
+# default io output (io.write's target) and the io.stdout handle to stderr
+# in nlua_init(), before any Lua code can run — covered by the
+# `io_write_safe` parity check (test/parity-check.mjs). `print()` never
+# wrote to fd 1 in the first place (nvim replaces it with nlua_print, which
+# routes through the message system — `print_safe` check). Other C-level
+# stdout writers remain a theoretical hole; nothing in the embedded
+# headless path writes to C stdout. A new #elif defined(__wasi__) branch
+# keeps fds 0/1 as the channel endpoints, which is exactly what the wasm
+# host wires up.
 #
 # Alternatives considered and rejected: implementing F_DUPFD in the shim
 # layer is impossible to do honestly (fd_renumber invalidates the source
@@ -49,8 +51,8 @@
 +#elif defined(__wasi__)
 +  // WASI preview1 has no dup()/F_DUPFD (fd_renumber MOVES an fd; there is no
 +  // way to duplicate one), so the redirect below is impossible; the RPC
-+  // channel stays on fds 0/1. KNOWN LIMITATION: anything else that writes to
-+  // fd 1 (e.g. user Lua io.write()) corrupts the msgpack-RPC stream.
++  // channel stays on fds 0/1. Lua's stdout surface (io.write/io.stdout) is
++  // diverted to stderr in nlua_init() -- see patches/neovim-lua-stdio.patch.
  #else
    if (embedded_mode) {
      // Redirect stdout/stdin (the UI channel) to stderr. Use fnctl(F_DUPFD_CLOEXEC) instead of dup()

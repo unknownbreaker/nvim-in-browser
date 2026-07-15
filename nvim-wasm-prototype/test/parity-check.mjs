@@ -19,9 +19,10 @@
 // framing) — both resolve from the parent repo's node_modules via normal
 // upward module resolution, regardless of cwd.
 //
-// Checks are declared in the CHECKS array as { name, fn(rpc) }. `fn` returns
-// { ok: boolean, detail: string } (or throws). Later tasks append entries to
-// CHECKS; the runner runs whatever checks exist.
+// Checks are declared in the CHECKS array as { name, fn(rpc, ctx) }. `fn`
+// returns { ok: boolean, detail: string } (or throws). `ctx` carries a
+// per-request timeout helper and captured-stderr access. Later tasks append
+// entries to CHECKS; the runner runs whatever checks exist.
 
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
@@ -231,6 +232,7 @@ async function startNvimHost(wasmBytes, runtimeEntries, cb) {
     }
     fd_write(data) {
       console.warn("[nvim stderr]", dec.decode(data));
+      cb.onStderr?.(data.slice());
       return { ret: 0, nwritten: data.byteLength };
     }
   }
@@ -464,8 +466,9 @@ function asString(v) {
 }
 
 // ---------------------------------------------------------------------------
-// Checks. Each is { name, fn(rpc) -> { ok, detail } | throws }. Later tasks
-// append entries here; the runner runs whatever checks exist.
+// Checks. Each is { name, fn(rpc, ctx) -> { ok, detail } | throws }, where
+// ctx = { timeout(promise, ms, what), stderrBytes() }. Later tasks append
+// entries here; the runner runs whatever checks exist.
 // ---------------------------------------------------------------------------
 
 const CHECKS = [
@@ -491,6 +494,86 @@ const CHECKS = [
         return { ok: false, detail: `v:progpath does not end with "nvim": ${JSON.stringify(value)}` };
       }
       return { ok: true, detail: `v:progpath = ${JSON.stringify(value)}` };
+    },
+  },
+  {
+    // Baseline sanity check for the stdio story: Lua print() must never touch
+    // fd 1 — nvim replaces the global print with nlua_print (executor.c),
+    // which routes through the message system, not C stdio. So print() must
+    // not disturb the msgpack-RPC stream, before OR after the io.write fix.
+    name: "print_safe",
+    async fn(rpc, ctx) {
+      const execResult = await ctx.timeout(
+        rpc.request("nvim_exec_lua", ["print('x') return 2", []]),
+        2000,
+        "nvim_exec_lua(print)",
+      );
+      if (execResult !== 2) {
+        return { ok: false, detail: `exec_lua returned ${JSON.stringify(execResult)}, expected 2` };
+      }
+      const evalResult = await ctx.timeout(rpc.request("nvim_eval", ["2+2"]), 2000, 'nvim_eval("2+2")');
+      if (evalResult !== 4) {
+        return { ok: false, detail: `eval 2+2 returned ${JSON.stringify(evalResult)}, expected 4` };
+      }
+      return { ok: true, detail: "print('x') left RPC intact (exec_lua -> 2, eval 2+2 -> 4)" };
+    },
+  },
+  {
+    // User Lua io.write() must not corrupt the msgpack-RPC stream. The 3-byte
+    // payload 0xdc 0x00 0x10 is the exact sequence empirically proven fatal
+    // (a bare msgpack array16 header: an unfixed nvim writes it to fd 1,
+    // permanently desyncing the RPC framing — every later response is eaten
+    // as an "array element" and the session hangs). The follow-up eval runs
+    // under a 2s timeout so an unfixed build reports FAIL instead of hanging
+    // the harness. Post-fix, the bytes must land on stderr instead.
+    //
+    // NOTE: keep this check LAST — against an unfixed build it kills the RPC
+    // session, so any check after it would fail spuriously.
+    name: "io_write_safe",
+    async fn(rpc, ctx) {
+      const JUNK = [0xdc, 0x00, 0x10];
+      // Fire the exec_lua and do NOT await it first: on an unfixed build its
+      // own response is already swallowed by the desynced framing. Attach a
+      // no-op catch so a dead session can't surface an unhandled rejection.
+      const execPromise = rpc.request("nvim_exec_lua", [
+        "io.write(string.char(0xdc,0x00,0x10)) return 1",
+        [],
+      ]);
+      execPromise.catch(() => {});
+      let evalResult;
+      try {
+        evalResult = await ctx.timeout(rpc.request("nvim_eval", ["1+1"]), 2000, 'nvim_eval("1+1") after io.write');
+      } catch (e) {
+        return {
+          ok: false,
+          detail: `RPC stream dead after 3 bytes of io.write(): ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
+      if (evalResult !== 2) {
+        return { ok: false, detail: `eval 1+1 returned ${JSON.stringify(evalResult)}, expected 2` };
+      }
+      const execResult = await ctx.timeout(execPromise, 2000, "exec_lua(io.write) response");
+      if (execResult !== 1) {
+        return { ok: false, detail: `exec_lua returned ${JSON.stringify(execResult)}, expected 1` };
+      }
+      // The junk must have been DIVERTED to stderr, not silently swallowed.
+      const stderrBytes = ctx.stderrBytes();
+      const junkOnStderr = (() => {
+        outer: for (let i = 0; i + JUNK.length <= stderrBytes.length; i++) {
+          for (let j = 0; j < JUNK.length; j++) {
+            if (stderrBytes[i + j] !== JUNK[j]) continue outer;
+          }
+          return true;
+        }
+        return false;
+      })();
+      if (!junkOnStderr) {
+        return { ok: false, detail: "RPC survived but the io.write bytes never appeared on stderr" };
+      }
+      return {
+        ok: true,
+        detail: "io.write junk diverted to stderr; RPC intact (exec_lua -> 1, eval 1+1 -> 2)",
+      };
     },
   },
 ];
@@ -524,12 +607,14 @@ async function main() {
   let fatal = null;
   let exited = null;
   let host = null;
+  const stderrChunks = [];
 
   const rpc = new NvimRpc((bytes) => host.sendStdin(bytes.slice()));
   rpc.onNotification = () => {}; // redraw etc. — ignore
 
   host = await startNvimHost(wasmBytes, runtimeEntries, {
     onStdout: (chunk) => rpc.feed(chunk),
+    onStderr: (chunk) => stderrChunks.push(chunk),
     onExit: (code) => (exited = code),
     onFatal: (message) => (fatal = message),
   });
@@ -551,11 +636,29 @@ async function main() {
   console.log(`ui_attach -> ${JSON.stringify(attach)}`);
   if (fatal) fail(`host reported fatal during boot: ${fatal}`);
 
+  // Context handed to every check alongside the rpc handle: a per-call
+  // timeout helper (so a check can bound individual requests more tightly
+  // than the whole-check timeout) and access to everything nvim wrote to
+  // stderr so far, concatenated.
+  const ctx = {
+    timeout: withTimeout,
+    stderrBytes: () => {
+      const total = stderrChunks.reduce((a, c) => a + c.length, 0);
+      const out = new Uint8Array(total);
+      let off = 0;
+      for (const c of stderrChunks) {
+        out.set(c, off);
+        off += c.length;
+      }
+      return out;
+    },
+  };
+
   let passed = 0;
   let failed = 0;
   for (const check of CHECKS) {
     try {
-      const result = await withTimeout(Promise.resolve(check.fn(rpc)), 8000, `check ${check.name}`);
+      const result = await withTimeout(Promise.resolve(check.fn(rpc, ctx)), 8000, `check ${check.name}`);
       if (result.ok) {
         passed++;
         console.log(`PASS ${check.name}: ${result.detail}`);

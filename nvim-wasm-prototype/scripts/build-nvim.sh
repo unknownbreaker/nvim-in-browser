@@ -82,23 +82,34 @@ require_deps() {
   [[ -x "${HOSTBIN}/lua" ]] || die "missing host lua; run scripts/build-deps.sh"
 }
 
-# --- patch: the one genuine Neovim source patch --------------------------------
+# --- patch: the genuine Neovim source patches -----------------------------------
 # patches/neovim-embed-stdio.patch guards channel_from_stdio()'s --embed fd
 # redirect under !__wasi__ (preview1 has no dup; the redirect would hand the
-# RPC channel fd -1). See the patch header for the full rationale. Applied
-# in place to src-cache/neovim (fetch-sources.sh re-extracts pristine trees
-# only on version bumps); a grep guard keeps this idempotent.
+# RPC channel fd -1). patches/neovim-lua-stdio.patch closes the gap the
+# first one leaves open: with the RPC channel kept on fd 1, user Lua
+# io.write()/io.stdout would corrupt the msgpack stream, so nlua_init()
+# diverts Lua's default io output + io.stdout to stderr under __wasi__. See
+# the patch headers for the full rationale. Applied in place to
+# src-cache/neovim (fetch-sources.sh re-extracts pristine trees only on
+# version bumps); per-patch grep guards keep this idempotent.
 apply_nvim_patches() {
   CURRENT_STEP="patch"
-  local marker='#elif defined(__wasi__)'
-  if grep -qF "${marker}" "${NVIM_SRC}/src/nvim/channel.c"; then
-    log "patch: neovim-embed-stdio.patch already applied, skipping"
+  apply_one_patch neovim-embed-stdio.patch src/nvim/channel.c \
+    '#elif defined(__wasi__)'
+  apply_one_patch neovim-lua-stdio.patch src/nvim/lua/executor.c \
+    'io.output(io.stderr) io.stdout = io.stderr'
+}
+
+apply_one_patch() {
+  local patch_file="$1" target="$2" marker="$3"
+  if grep -qF "${marker}" "${NVIM_SRC}/${target}"; then
+    log "patch: ${patch_file} already applied, skipping"
     return 0
   fi
-  patch -p1 -d "${NVIM_SRC}" < "${PROTO_ROOT}/patches/neovim-embed-stdio.patch"
-  grep -qF "${marker}" "${NVIM_SRC}/src/nvim/channel.c" \
-    || die "patch applied but marker not found in channel.c"
-  log "patch: applied patches/neovim-embed-stdio.patch"
+  patch -p1 -d "${NVIM_SRC}" < "${PROTO_ROOT}/patches/${patch_file}"
+  grep -qF "${marker}" "${NVIM_SRC}/${target}" \
+    || die "${patch_file} applied but marker not found in ${target}"
+  log "patch: applied patches/${patch_file}"
 }
 
 # --- host-nlua0: native helper module for Neovim's code generators -----------
