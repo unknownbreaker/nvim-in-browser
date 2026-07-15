@@ -67,6 +67,10 @@ fi
 
 # --- build & package ------------------------------------------------------
 npm ci
+# Fetch the pinned nvim-wasi engine (idempotent: skips when the local copy
+# already matches engine.lock.json) so the build has an engine to bundle even
+# on a fresh checkout.
+npm run fetch-assets
 npm run build
 [[ -f dist/chromium/manifest.json ]] || { restore_bump; die "build did not produce dist/chromium/manifest.json"; }
 
