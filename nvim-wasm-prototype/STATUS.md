@@ -7,7 +7,7 @@ failed experiments get recorded, not erased.
 
 - [x] 1. Toolchain fetch + hello-world C compiles to wasm32-wasi and runs in Node.
 - [x] 2. Leaf deps compile (utf8proc, treesitter, lua 5.1, …). Host lua/luac built.
-- [ ] 3. libuv compiles against our shim layer (links, symbols resolved).
+- [x] 3. libuv compiles against our shim layer (links, symbols resolved).
 - [ ] 4. Neovim objects compile; binary links.
 - [ ] 5. `_start` reaches first `poll_oneoff` under the parent engine host.
 - [ ] 6. `--embed` handshake: answers `nvim_ui_attach`.
@@ -175,3 +175,122 @@ failed experiments get recorded, not erased.
 - No dependency versions were overridden — all pins in `VERSIONS.md` stand.
   `libvterm`/`libtermkey`/`msgpack-c` remain absent from the manifest (Task 3
   finding); nothing to build for them here.
+
+### 2026-07-15 — Task 5: libuv on wasm32-wasi via clean-room shim layer (rung 3)
+
+**Gate green:** `bash test/uv-smoke.sh` — compiles `test/uv-smoke.c` against
+`build/deps/lib/libuv.a`, runs under `node test/run-wasi.mjs` with piped
+stdin, PASSES both cases: (A) stdin data already buffered, (B) data arriving
+300ms in (proves a *blocked* loop wakes on fd readiness). 10ms timer fired at
+12ms; line echoed verbatim fd0→fd1 via `uv_pipe`/`uv_read_start`/`uv_write`;
+`uv_run` drained to 0; `uv_loop_close` returned 0. `build-deps.sh` re-run is
+an all-"skipping" no-op (idempotent).
+
+**De-risking probes (ran these FIRST, before any design commitment):**
+
+- **poll_oneoff via wasi-libc `poll()` works under Node 24 `node:wasi`**:
+  pure clock subscription blocks accurately (50ms asked → 52ms measured);
+  `fd_read` subscription on piped stdin *blocks and wakes* when data arrives
+  later (300ms delayed write → poll returned at ~230ms after loop entry with
+  `POLLIN`); writer close surfaces as `POLLIN|POLLHUP` (wasi-libc POLLHUP is
+  0x2000). This was the riskiest assumption of the whole rung; it held.
+- **`fcntl(F_SETFL, O_NONBLOCK)` on fd 0 works under Node WASI** (uvwasi
+  honors `fd_fdstat_set_flags`): `read()` on a drained-but-open pipe returns
+  EAGAIN in 0ms instead of blocking. Consequence: upstream `stream.c` /
+  `pipe.c` read/write machinery works *unmodified* — no read-wrapper layer
+  needed.
+
+**Architecture decision — hybrid of the two candidate shapes.** Considered
+(a) compile libuv portable/unix sources + custom platform polling core vs
+(b) reimplement the public uv_* API by hand. Chose (a) with targeted hand
+shims where WASI genuinely lacks the substrate. Compiled UNMODIFIED from
+upstream: `fs-poll, idna, inet, random, strscpy, strtok, timer, uv-common,
+uv-data-getter-setters, version` + unix `core, dl, fs, getaddrinfo,
+getnameinfo, loop-watcher, loop, no-fsevents, no-proctitle, pipe, poll,
+posix-hrtime, stream, tcp`. Replaced with shims (`shims/uv-wasi-*.c`, each
+header-commented): the platform poll core, async, threads, threadpool,
+signal, process, tty, udp, platform-misc, plus `wasi-libc-missing.c`
+(POSIX symbols wasi-libc declares-or-omits but never defines) and
+`shims/include/` headers wasi-libc lacks (`termios.h`, `pwd.h`, `grp.h`,
+`netdb.h`, `net/if.h`, `sys/statfs.h`). `shims/uv-wasi-fixups.h` is
+force-included (`-include`) into every libuv TU to re-declare the POSIX
+surface wasi-libc hides behind `__wasilibc_unmodified_upstream` (sockets,
+sigmask, rlimit/priority/sched, `sockaddr_un.sun_path` via tag-rename,
+SO_*/CMSG_* constants). `patches/libuv-wasi.patch` is deliberately tiny —
+3 hunks: `uv/unix.h` gains a `__wasi__` platform-include (uv/posix.h loop
+fields), `random.c` gains a `__wasi__` dispatch branch (getentropy), and
+`core.c`'s rusage field-copy guard adds `!defined(__wasi__)` (wasi-libc's
+emulated rusage has only utime/stime).
+
+**Polling core (`shims/uv-wasi-poll.c`)** — modeled on upstream
+`posix-poll.c` (MIT, in-tree), two deliberate deviations:
+
+1. **nfds==0 sleeps instead of returning.** Upstream returns immediately
+   when no fds are watched — safe there only because every loop owns an
+   async-wakeup fd (so nfds ≥ 1 always). Our async shim is fd-less, so a
+   timer-only loop really can reach nfds==0; returning would busy-spin
+   uv_run until the timer expires. We sleep the full backend timeout on a
+   pure clock subscription (`poll(NULL, 0, timeout)`). Verified: a 2s
+   timer-only program consumes 0.02s user CPU over 2.04s wall — the loop
+   genuinely parks in `poll_oneoff`. **This is the rung-8 idle-wakeups
+   property, designed in now: no busy-wait paths exist.**
+2. No SIGPROF masking (`UV_LOOP_BLOCK_SIGPROF` accepted, ignored — WASI
+   has no signal delivery), and no `signal_io_watcher` special case.
+
+**Async without an fd (`shims/uv-wasi-async.c`)**: single thread ⇒
+`uv_async_send` can only run from loop callbacks, never concurrently with a
+blocked poll. Send = set handle pending + `uv__io_feed(loop's fd-less
+async_io_watcher)`. Upstream machinery does the rest: non-empty
+pending_queue forces `uv_backend_timeout()==0` (next poll can't block),
+`uv__run_pending` dispatches `UV__ASYNC_IO` → our `uv__async_io` drains
+`loop->async_handles` exactly like upstream. No spinning, correct uv_run
+phase ordering, zero new loop-state invariants.
+
+**Threadpool inline (`shims/uv-wasi-threadpool.c`)**: `uv__work_submit`
+runs the work callback synchronously at submit, then posts completion
+through `loop->wq` + `uv_async_send(&loop->wq_async)` — done callbacks
+still fire asynchronously on the next loop turn (upstream contract kept);
+`uv_cancel` always UV_EBUSY (work has always already run).
+
+**What's real / stubbed / ENOSYS:**
+
+| surface | status |
+| --- | --- |
+| loop, timers, idle/prepare/check, pending queue | real (upstream code) |
+| uv_pipe_open + stream read/write on existing fds | real (upstream stream.c/pipe.c over our poll core) |
+| uv_fs_* | real via wasi-libc (sync syscalls; async runs inline-at-submit, cb on next tick); mkdtemp/mkstemp implemented in shim (getentropy+mkdir/open); statfs mapped onto statvfs; chown/link-perms fail ENOSYS |
+| uv_async | real (fd-less pending-flag design above) |
+| uv_random / uv_hrtime / uv_now / uv_sleep / uv_clock_gettime | real (WASI random_get / clock_gettime) |
+| uv_mutex/rwlock/sem/cond/once/key | no-op-correct for single thread; blocking waits (`sem_wait` on 0, `cond_wait`) abort loudly = deadlock made visible |
+| uv_thread_create | UV_ENOSYS (honest; no threads target) |
+| uv_signal_* | register-and-never-fire (start succeeds, cb never runs — WASI has no signal delivery) |
+| uv_spawn / uv_kill / uv_pipe(2fds) | UV_ENOSYS (no processes/pipes in preview1) |
+| uv_tty_* | TTY-as-stream: init=stream over fd, set_mode=no-op success, get_winsize=UV_ENOTSUP |
+| uv_tcp_* | compiles from upstream; every socket op fails ENOSYS at runtime via libc stubs |
+| uv_udp_* | hand shim: init/close coherent, everything else UV_ENOSYS (upstream udp.c needs multicast surface WASI lacks) |
+| uv_getaddrinfo/getnameinfo | upstream code; libc stub returns EAI_FAIL → UV_EAI_FAIL (honest) |
+| uv_exepath / uv_cpu_info / uv_interface_addresses | UV_ENOSYS |
+| uv_get_total/free_memory, uv_resident_set_memory, uv_uptime, uv_loadavg | coarse-but-real (wasm linear memory size, monotonic clock) |
+| fs events (uv_fs_event_*) | UV_ENOSYS (upstream no-fsevents.c) |
+
+**Risks / carry-forwards for rung 4+:**
+
+- **Neovim's TUI runs on a `uv_thread`** (and clipboard/job control spawn
+  processes). `uv_thread_create`=ENOSYS means the wasm build must stay on
+  the `--embed` headless path (which is the plan); expect rung-4/6 link or
+  runtime probes to confirm nothing else insists on a real thread. nvim's
+  `uv_cond`/`uv_sem` uses (if any hot ones exist) will abort loudly by
+  design — better than silent hangs; revisit per-callsite if hit.
+- **`uv_exepath` = ENOSYS** → `v:progpath` empty; nvim runtime-path
+  discovery may need a synthetic exepath under the wasm host (rung 6).
+- **`uv_tty_get_winsize` = ENOTSUP** → embedder must drive UI size over
+  RPC (`nvim_ui_attach` does exactly this).
+- **luv (rung 4) links the whole public uv surface** — that's why tcp/udp/
+  getaddrinfo stubs exist as linkable, honest-failing symbols rather than
+  being dropped.
+- wasi-libc `poll()` quirk noted for later: POLLPRI-only subscriptions
+  return ENOSYS; our poll core never requests POLLPRI (UV__POLLPRI is 0 on
+  this target). UV__POLLRDHUP (0x2000 fallback) numerically equals wasi
+  POLLHUP — coincidentally correct semantics (both mean hangup).
+- `test/uv-smoke.sh` is the reusable gate harness; `test/run-wasi.mjs`
+  untouched (stdin piping happens in the shell harness, not the runner).

@@ -250,6 +250,109 @@ build_lua_compat53() {
   log "lua-compat53: built ${LIB}/libluacompat53.a (+ staged compat-5.3.h)"
 }
 
+# --- libuv (wasm32-wasi static lib: upstream sources + our WASI shim port) ---
+# Rung 3. Strategy (see shims/*.c headers + STATUS.md): compile libuv's
+# portable sources and the portable parts of src/unix unmodified; replace the
+# platform polling core with our poll_oneoff-backed shims/uv-wasi-poll.c; hand
+# shims for async/threads/threadpool/signal/process/tty/platform (single
+# thread, register-never-fire signals, ENOSYS spawn, TTY-as-pipe).
+# patches/libuv-wasi.patch adds the __wasi__ platform-include and random
+# branches; shims/include supplies headers wasi-libc omits (termios/pwd/grp/
+# netdb); shims/uv-wasi-fixups.h is force-included to declare chown & co.;
+# shims/wasi-libc-missing.c fills libc.a's undefined-at-link POSIX symbols.
+build_libuv() {
+  CURRENT_STEP="libuv"
+  if [[ -f "${LIB}/libuv.a" ]]; then
+    log "libuv: already built (${LIB}/libuv.a), skipping"
+    return 0
+  fi
+  local w="${WORK}/libuv"
+  rm -rf "${w}"
+  cp -R "${SRC}/libuv" "${w}"
+  CURRENT_STEP="libuv: applying patches/libuv-wasi.patch"
+  patch -p1 -d "${w}" < "${PATCHES}/libuv-wasi.patch"
+
+  CURRENT_STEP="libuv: compiling wasm objects"
+  local shims="${PROTO_ROOT}/shims"
+  local uvflags=(
+    "${WASI_CFLAGS[@]}"
+    -std=gnu11
+    -D_GNU_SOURCE
+    -I"${w}/include" -I"${w}/src" -I"${w}/src/unix"
+    -I"${shims}/include"
+    -include "${shims}/uv-wasi-fixups.h"
+  )
+
+  # Upstream libuv sources that compile for wasm32-wasi unmodified.
+  local upstream=(
+    src/fs-poll.c
+    src/idna.c
+    src/inet.c
+    src/random.c
+    src/strscpy.c
+    src/strtok.c
+    src/timer.c
+    src/uv-common.c
+    src/uv-data-getter-setters.c
+    src/version.c
+    src/unix/core.c
+    src/unix/dl.c
+    src/unix/fs.c
+    src/unix/getaddrinfo.c
+    src/unix/getnameinfo.c
+    src/unix/loop-watcher.c
+    src/unix/loop.c
+    src/unix/no-fsevents.c
+    src/unix/no-proctitle.c
+    src/unix/pipe.c
+    src/unix/poll.c
+    src/unix/posix-hrtime.c
+    src/unix/stream.c
+    src/unix/tcp.c
+  )
+  # Our clean-room WASI port layer (each file documents what it replaces).
+  local shim_srcs=(
+    uv-wasi-poll.c
+    uv-wasi-async.c
+    uv-wasi-threads.c
+    uv-wasi-threadpool.c
+    uv-wasi-signal.c
+    uv-wasi-process.c
+    uv-wasi-tty.c
+    uv-wasi-udp.c
+    uv-wasi-platform.c
+    wasi-libc-missing.c
+  )
+
+  local objdir="${w}/wasi-objs"
+  mkdir -p "${objdir}"
+  local objs=() f o
+  for f in "${upstream[@]}"; do
+    o="${objdir}/$(basename "${f}" .c).o"
+    "${CC}" "${uvflags[@]}" -c "${w}/${f}" -o "${o}"
+    objs+=("${o}")
+  done
+  for f in "${shim_srcs[@]}"; do
+    o="${objdir}/shim-$(basename "${f}" .c).o"
+    "${CC}" "${uvflags[@]}" -c "${shims}/${f}" -o "${o}"
+    objs+=("${o}")
+  done
+
+  "${AR}" rcu "${LIB}/libuv.a" "${objs[@]}"
+  "${RANLIB}" "${LIB}/libuv.a"
+
+  CURRENT_STEP="libuv: staging headers"
+  # Stage the PATCHED public headers (uv/unix.h carries the __wasi__ branch)
+  # plus our shim headers (termios/pwd/grp/netdb/...), which uv/unix.h
+  # includes and wasi-libc does not provide -- any consumer of uv.h needs
+  # both on its include path.
+  cp "${w}/include/uv.h" "${INC}/"
+  rm -rf "${INC}/uv"
+  cp -R "${w}/include/uv" "${INC}/uv"
+  cp -R "${shims}/include/." "${INC}/"
+  log "libuv: built ${LIB}/libuv.a (+ staged patched uv headers + shim headers)"
+}
+
 # --- one tree-sitter grammar -> one static archive ---------------------------
 # Args: <libname> then one or more "<src-dir>:<prefix>" specs. Each spec
 # compiles parser.c (always) and scanner.c (if present) from <src-dir>/src,
@@ -308,7 +411,7 @@ build_parsers() {
 
 # --- dispatch ----------------------------------------------------------------
 
-ALL_DEPS=(lua-host lua utf8proc treesitter lpeg unibilium lua-compat53 parsers)
+ALL_DEPS=(lua-host lua utf8proc treesitter lpeg unibilium lua-compat53 parsers libuv)
 
 build_one() {
   case "$1" in
@@ -319,6 +422,7 @@ build_one() {
     lpeg)          build_lpeg ;;
     unibilium)     build_unibilium ;;
     lua-compat53)  build_lua_compat53 ;;
+    libuv)         build_libuv ;;
     parsers)       build_parsers ;;
     ts-c)          build_ts_c ;;
     ts-lua)        build_ts_lua ;;
