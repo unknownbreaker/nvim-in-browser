@@ -63,7 +63,7 @@ failed experiments get recorded, not erased.
   downloads+verifies+extracts every entry it finds (except a documented
   `SKIP_DEPS` list), plus PUC Lua 5.1.5 from lua.org.
 - **Discovery — full manifest as shipped in `cmake.deps/deps.txt` for
-  v0.12.4** (21 entries): `LIBUV`, `LUAJIT`, `LUA`, `UNIBILIUM`, `LUV`,
+  v0.12.4** (20 entries): `LIBUV`, `LUAJIT`, `LUA`, `UNIBILIUM`, `LUV`,
   `LPEG`, `LUA_COMPAT53`, `WIN32YANK_X86_64`, `GETTEXT`, `LIBICONV`,
   `UTF8PROC`, `TREESITTER_C`, `TREESITTER_LUA`, `TREESITTER_VIM`,
   `TREESITTER_VIMDOC`, `TREESITTER_QUERY`, `TREESITTER_MARKDOWN`,

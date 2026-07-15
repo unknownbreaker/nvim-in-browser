@@ -190,12 +190,25 @@ ensure_verified_tarball() {
 }
 
 extract_stripped() {
-  local asset="$1" install_dir="$2"
+  local asset="$1" install_dir="$2" expected_sha="$3"
   local tarball="${DOWNLOAD_DIR}/${asset}"
+  local stamp_file="${install_dir}/.source-sha256"
 
   if [[ -d "${install_dir}" ]] && [[ -n "$(ls -A "${install_dir}" 2>/dev/null)" ]]; then
-    echo "fetch-sources.sh: ${install_dir} already extracted, skipping"
-    return 0
+    # Directory is non-empty; check if it's properly stamped and matches current source
+    if [[ -f "${stamp_file}" ]]; then
+      local stamped_sha
+      stamped_sha="$(cat "${stamp_file}")"
+      if [[ "${stamped_sha}" == "${expected_sha}" ]]; then
+        echo "fetch-sources.sh: ${install_dir} already extracted, skipping"
+        return 0
+      fi
+      # Stamp exists but doesn't match — stale extraction from a prior version
+      echo "fetch-sources.sh: stale/mismatched extraction for ${asset}, re-extracting" >&2
+    else
+      # Directory is non-empty but has no stamp — older extraction without versioning
+      echo "fetch-sources.sh: unstamped extraction for ${asset}, re-extracting" >&2
+    fi
   fi
 
   CURRENT_STEP="extracting ${asset} into ${install_dir}"
@@ -206,6 +219,9 @@ extract_stripped() {
 
   [[ -n "$(ls -A "${install_dir}" 2>/dev/null)" ]] \
     || die "extraction of ${asset} produced an empty directory"
+
+  # Stamp the extraction with the tarball's sha256 for future version-bump detection
+  echo "${expected_sha}" > "${stamp_file}"
 }
 
 # Converts a deps.txt NAME (e.g. TREESITTER_MARKDOWN) into a src-cache
@@ -238,7 +254,7 @@ fetch_neovim() {
 
   mkdir -p "${DOWNLOAD_DIR}"
   ensure_verified_tarball "${NEOVIM_ASSET}" "${NEOVIM_URL}" "${pinned}"
-  extract_stripped "${NEOVIM_ASSET}" "${NEOVIM_SRC_DIR}"
+  extract_stripped "${NEOVIM_ASSET}" "${NEOVIM_SRC_DIR}" "${pinned}"
 }
 
 # --- Step 2: parse Neovim's own deps.txt -------------------------------------
@@ -288,7 +304,7 @@ fetch_dep() {
   fi
 
   ensure_verified_tarball "${asset}" "${url}" "${expected_sha}"
-  extract_stripped "${asset}" "${install_dir}"
+  extract_stripped "${asset}" "${install_dir}" "${expected_sha}"
 
   echo "${name} ${asset} ${expected_sha} ${install_dir}" >> "${DEP_SUMMARY_FILE}"
 }
@@ -302,7 +318,7 @@ fetch_lua() {
     die "VERSIONS.md pin for ${LUA_ASSET} (${pinned}) disagrees with the well-known lua.org sha256 (${expected})"
   fi
   ensure_verified_tarball "${LUA_ASSET}" "${LUA_URL}" "${expected}"
-  extract_stripped "${LUA_ASSET}" "${LUA_SRC_DIR}"
+  extract_stripped "${LUA_ASSET}" "${LUA_SRC_DIR}" "${expected}"
   echo "LUA ${LUA_ASSET} ${expected} ${LUA_SRC_DIR}" >> "${DEP_SUMMARY_FILE}"
 }
 
