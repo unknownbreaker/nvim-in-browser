@@ -393,9 +393,11 @@ int dup2(int oldfd, int newfd) {
  * for other symbols — a same-named strong definition here is a guaranteed
  * duplicate-symbol error (caught by test/uv-linkall.c's link-all gate).
  * Instead, shims/uv-wasi-fixups.h (force-included into every libuv TU)
- * #defines access to this function, so libuv's uv_fs_access — the only
- * access() caller in the whole link (verified: neither Neovim nor PUC Lua
- * call it directly) — is routed here at compile time. */
+ * #defines access to this function, so both access() call sites in the
+ * link — libuv fs.c's uv_fs_access and unix/core.c's uv__search_path — are
+ * routed here at compile time; both are libuv TUs compiled with the
+ * fixups header, so no behavior change (verified: neither Neovim nor PUC
+ * Lua call access() directly). */
 int uv__wasi_access_shim(const char* path, int amode) {
   struct stat st;
 

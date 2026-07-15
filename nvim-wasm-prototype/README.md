@@ -80,13 +80,16 @@ bash scripts/build-deps.sh        # 13 wasm archives + host lua
 bash scripts/build-nvim.sh        # build/nvim/bin/nvim (wasm32-wasi)
 bash scripts/asyncify.sh          # dist/nvim-asyncify.wasm
 bash scripts/package-runtime.sh   # dist/nvim-runtime.tar.gz
-bash scripts/smoke.sh             # rung-8 gate: parent smoke-nvim.mjs -> SMOKE PASS
+bash scripts/smoke.sh             # rung-8+ gate: parent smoke-nvim.mjs -> SMOKE PASS, then parity-check.mjs -> PARITY PASS
 ```
 
 `scripts/smoke.sh` points the parent repo's real harness
 (`../scripts/smoke-nvim.mjs`) at the two `dist/` artifacts via
 `NVIM_WASM_PATH`/`NVIM_RUNTIME_PATH`; PASS includes the idle-wakeups
-assertion (final sample ≤5/s; this build measures ~0/s idle).
+assertion (final sample ≤5/s; this build measures ~0/s idle). Once the
+parent smoke passes, `scripts/smoke.sh` also runs `test/parity-check.mjs`
+against the same two artifacts, so a single invocation gives both
+`SMOKE PASS` and `PARITY PASS`.
 
 ## Results (2026-07-15)
 
@@ -97,7 +100,7 @@ idle-CPU gate.
 
 | Metric | Clean-room build | Vendored (nvim-wasm) |
 |---|---|---|
-| Asyncified binary | 10,825,005 B (incl. 7 statically linked tree-sitter grammars; 8,041,186 B before them) | 8,386,869 B |
+| Asyncified binary | 10,825,005 B (incl. 7 statically linked tree-sitter grammars; 8,041,186 B before them — 417 B above the original rung-8 baseline of 8,040,769 B, the cumulative effect of two prior rebuilds, the `uv_exepath` synthetic-path shim (+69 B) and the Lua-stdio patch (+348 B), not measurement error; see `STATUS.md`) | 8,386,869 B |
 | Runtime tarball | 5,742,514 B | 5,613,852 B |
 | Idle poll wakeups (final 5s sample) | 0.00/s | 1/s (needs host backoff) |
 
@@ -131,16 +134,41 @@ never engages — idle is genuinely event-driven.
 
 **What an engine swap would take:** the parent host runs this binary
 unchanged (same argv/env/preopens/Asyncify ABI, incl. the
-`nvim_asyncify_get_*` scratch exports). The known parity gaps are closed
-and gated by `test/parity-check.mjs`: `uv_exepath` returns a synthetic
-absolute path (`v:progpath` populated — `progpath` check); user Lua
-`io.write()`/`io.stdout` no longer reaches the RPC fd (upstream's stdio
-redirect is unimplementable under preview1, so `nlua_init()` diverts Lua's
-io output to stderr — `io_write_safe`/`print_safe` checks); and
-`vim.treesitter` works without dlopen — all 7 pinned grammars (c, lua,
-vim, vimdoc, query, markdown, markdown_inline) are statically linked and
-pre-registered, and runtime-Lua `require` itself was un-broken along the
-way (wasi-libc's rights-based `access()` fails under zero-rights hosts
-like the browser shim; libuv's `uv_fs_access` is now routed to a
-stat-based shim — `treesitter` check). Remaining: browser/overlay smokes
-against our binary. Full open-items list in `STATUS.md`.
+`nvim_asyncify_get_*` scratch exports). **All three parity gaps that would
+have blocked a swap are now closed**, each proven by a permanent check in
+`test/parity-check.mjs` — folded into `scripts/smoke.sh`'s standing gate
+(`bash scripts/smoke.sh` now prints `SMOKE PASS` then `PARITY PASS`), not a
+one-off manual run:
+
+- **`v:progpath` empty:** `uv_exepath` returns a synthetic absolute path
+  (`/nvim/bin/nvim`) instead of `ENOSYS` (`progpath` check).
+- **`io.write()`/`io.stdout` corrupting the RPC stream:** `nlua_init()`
+  diverts Lua's default io output and `io.stdout` to stderr under
+  `__wasi__`, since upstream's own stdio-redirect mechanism is
+  unimplementable under preview1 (no fd-duplication primitive) —
+  `io_write_safe`/`print_safe` checks.
+- **`vim.treesitter` needing dlopen:** all 7 pinned grammars (c, lua, vim,
+  vimdoc, query, markdown, markdown_inline) are statically linked and
+  pre-registered at `tslua_init()` time; fixing this also un-broke every
+  runtime-Lua `require` under zero-rights hosts like the browser shim
+  (wasi-libc's rights-based `access()` was routed to a stat-based shim for
+  both of libuv's `access()` call sites) — `treesitter` check.
+
+What remains before an engine-swap decision is made is **product
+decisions, not correctness gaps**:
+
+- **Binary size:** the asyncified binary is ~29% larger than the vendored
+  engine's 8,386,869 B, entirely the cost of the 7 embedded tree-sitter
+  grammars (+2.8 MB) — making them build-time opt-in would recover the
+  size for callers that don't need in-wasm `vim.treesitter`.
+- **Tarball pruning:** the packaged runtime tarball ships the full source
+  `runtime/` tree (docs, tutor, etc.), ~2.3% larger than the vendored
+  engine's tarball; pruning unused subtrees is a straightforward size win.
+- **Asyncify-stack overflow assert:** the 4 MiB `.bss` unwind stack has no
+  overflow assertion compiled in (binaryen's `asyncify-asserts` pass-arg
+  exists if this is ever suspected as the cause of a corruption bug).
+- **Threaded build:** `uv_thread_create` is an honest `ENOSYS`, so the wasm
+  build must stay on the `--embed` headless path; a real threaded build is
+  a separate, larger undertaking, not part of this parity work.
+
+Full open-items list in `STATUS.md`.

@@ -15,6 +15,13 @@ failed experiments get recorded, not erased.
 - [x] 8. Full `smoke-nvim.mjs` PASS including idle-wakeups gate. **(Definition of done)**
 - [ ] 9. Stretch: overlay/browser smokes against our binary; compare binary
       size and boot time vs vendored.
+      **Progress (2026-07-15, parity-gaps Task 4):** the three parity gaps
+      (progpath, io.write RPC safety, static tree-sitter) are closed and
+      `scripts/smoke.sh` now runs `test/parity-check.mjs` immediately after
+      the parent smoke harness passes, so PARITY PASS is part of the
+      standing rung-8+ gate, not a separate manual step. Browser/overlay
+      smokes against our binary (and the size/boot-time comparison) remain
+      the only unchecked stretch item.
 
 ## Log
 
@@ -885,9 +892,12 @@ failed with `module 'vim.treesitter' not found`. Probe-driven diagnosis
   - Landed shape: the function is named `uv__wasi_access_shim`
     (`shims/wasi-libc-missing.c`), and `shims/uv-wasi-fixups.h`
     (force-included into every libuv TU) `#define`s `access` to it —
-    compile-time routing of libuv's `uv_fs_access`, the only `access()`
-    caller in the whole link (verified: no direct calls in Neovim or PUC
-    Lua sources). No symbol conflict is possible.
+    compile-time routing of both `access()` call sites in the link: libuv
+    fs.c's `uv_fs_access` and unix/core.c's `uv__search_path` (verified —
+    `uv__search_path` also calls `access(X_OK)`; no direct calls in Neovim
+    or PUC Lua sources). Both call sites are libuv TUs compiled with the
+    same fixups header, so this is compile-time routing, not two separate
+    fixes — no behavior change. No symbol conflict is possible.
 
 **Failing-first evidence:** new `treesitter` parity check appended to
 `test/parity-check.mjs` (placed BEFORE `io_write_safe`, which must stay
@@ -946,5 +956,14 @@ engine's 8,386,869 B (it was 4.1% smaller before this task) — the honest
 cost of embedding 7 grammars. **This closes the "tree-sitter parser
 archives built but not linked" open item.**
 
-**Still open:** browser/overlay smokes against our binary not yet run
-(rung-9 stretch).
+**Still open:**
+
+- Browser/overlay smokes against our binary not yet run (rung-9 stretch).
+- Future TUs calling `access()` directly (outside libuv's fixups-header
+  coverage) silently get wasi-libc's broken rights-based `access()` — the
+  fix is scoped to libuv TUs via `shims/uv-wasi-fixups.h`'s force-include,
+  not a link-wide symbol override (a genuine link-wide override is
+  impossible — see the header's own comment on the duplicate-symbol
+  failure this would cause).
+- Tree-sitter grammars are always-linked (+2.8MB asyncified, binary now
+  +29% vs vendored); make them build-time opt-in if size matters.
