@@ -21,8 +21,8 @@ import { fileURLToPath } from "node:url";
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const IDLE_SECONDS = Number(process.argv[2] ?? 10);
 
-const wasmPath = path.join(root, "vendor", "nvim-wasm", "nvim-asyncify.wasm");
-const runtimePath = path.join(root, "vendor", "nvim-wasm", "nvim-runtime.tar.gz");
+const wasmPath = process.env.NVIM_WASM_PATH ?? path.join(root, "vendor", "nvim-wasm", "nvim-asyncify.wasm");
+const runtimePath = process.env.NVIM_RUNTIME_PATH ?? path.join(root, "vendor", "nvim-wasm", "nvim-runtime.tar.gz");
 
 function fail(msg) {
   console.error("SMOKE FAIL:", msg);
@@ -55,6 +55,9 @@ async function bundleEngine() {
 const wait = (ms) => new Promise((res) => setTimeout(res, ms));
 
 async function main() {
+  console.log(`Using WASM path: ${wasmPath}`);
+  console.log(`Using runtime path: ${runtimePath}`);
+
   const bundlePath = await bundleEngine();
   const { startNvimHost, untar, NvimRpc } = await import(pathToFileURL(bundlePath).href);
   await rm(bundlePath, { force: true });
