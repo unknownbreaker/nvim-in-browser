@@ -1,0 +1,37 @@
+# lua51-wasi.patch
+#
+# WHAT: Add a WASI (__wasi__) branch to the os.tmpname() configuration block in
+#       Lua 5.1.5's src/luaconf.h.
+#
+# WHY:  wasi-libc does not define L_tmpnam and marks tmpnam() as deprecated/
+#       unavailable ("tmpnam is not defined on WASI"). The stock luaconf.h
+#       falls through to `#define LUA_TMPNAMBUFSIZE L_tmpnam`, which fails to
+#       compile under wasm32-wasi (undeclared identifier L_tmpnam, then a
+#       non-integer array size). We add a WASI branch that uses a fixed buffer
+#       size and makes lua_tmpnam report failure, so loslib.c compiles; the
+#       effect is that os.tmpname() returns an error at runtime under WASI,
+#       which is acceptable for this prototype (no temp-file support in the
+#       sandbox).
+#
+# CLEAN-ROOM PROVENANCE: authored from first principles against PUC Lua 5.1.5
+#       upstream source and the wasi-libc header behaviour observed with our
+#       pinned wasi-sdk. No excluded project (MuNeNICK/nvim-wasm or
+#       MuNeNICK/monaco-neovim-wasm) was consulted.
+#
+# Apply with: patch -p1 < patches/lua51-wasi.patch   (from the lua source root)
+--- a/src/luaconf.h
++++ b/src/luaconf.h
+@@ -652,6 +652,13 @@
+ 	if (e != -1) close(e); \
+ 	e = (e == -1); }
+
++#elif defined(__wasi__)
++/* WASI has no tmpnam()/L_tmpnam (wasi-libc marks tmpnam deprecated and does
++** not define L_tmpnam). os.tmpname() is therefore unsupported: report failure
++** rather than fail to compile. */
++#define LUA_TMPNAMBUFSIZE	32
++#define lua_tmpnam(b,e)		{ (void)b; e = 1; }
++
+ #else
+ #define LUA_TMPNAMBUFSIZE	L_tmpnam
+ #define lua_tmpnam(b,e)		{ e = (tmpnam(b) == NULL); }

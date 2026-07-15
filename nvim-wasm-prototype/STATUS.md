@@ -6,7 +6,7 @@ failed experiments get recorded, not erased.
 ## Validation ladder
 
 - [x] 1. Toolchain fetch + hello-world C compiles to wasm32-wasi and runs in Node.
-- [ ] 2. Leaf deps compile (utf8proc, treesitter, lua 5.1, libvterm, …).
+- [x] 2. Leaf deps compile (utf8proc, treesitter, lua 5.1, …). Host lua/luac built.
 - [ ] 3. libuv compiles against our shim layer (links, symbols resolved).
 - [ ] 4. Neovim objects compile; binary links.
 - [ ] 5. `_start` reaches first `poll_oneoff` under the parent engine host.
@@ -122,3 +122,56 @@ failed experiments get recorded, not erased.
   populated) — confirms idempotency.
 - Pinned all 15 sources (Neovim + 13 deps + lua) into `VERSIONS.md` with
   version, asset filename, url, and sha256 for each.
+
+### 2026-07-14 — Task 4: leaf deps compile to wasm32-wasi (rung 2)
+
+- Added `scripts/build-deps.sh` (per-dep, resumable, `bash scripts/build-deps.sh
+  [dep...]`), `scripts/wasi-toolchain.cmake` (CMake cross-compile file:
+  `CMAKE_SYSTEM_NAME=WASI`, wasm32-wasi target, compiler/AR from `$WASI_SDK`,
+  the four wasi-libc `-D_WASI_EMULATED_*` defines + matching
+  `-lwasi-emulated-*` link flags), and `patches/lua51-wasi.patch`.
+- Gate green: `bash scripts/build-deps.sh` exits 0; produces 12 wasm32-wasi
+  `.a` archives in `build/deps/lib/` + staged headers in `build/deps/include/`;
+  host `build/host/bin/lua -v` and `luac -v` both print `Lua 5.1.5`. Re-run is
+  an all-"skipping" no-op (idempotent).
+- Archives verified as real wasm objects: `llvm-objdump --file-headers` reports
+  `file format wasm`; `libtree-sitter-c.a` exports `T tree_sitter_c`;
+  `liblua.a` exports the full `lua_*`/`luaL_*` API. wasm objects show the
+  expected undefined `__stack_pointer` / `__indirect_function_table`.
+
+**Per-dep outcome table:**
+
+| dep | build path | outcome | notes |
+| --- | --- | --- | --- |
+| lua (host) | native `make generic` (system clang) | clean | for Neovim's build-time Lua->C codegen; `generic` platform needs no readline/posix extras |
+| lua (wasm) | direct clang → `liblua.a` | **patched** | (1) `lua51-wasi.patch`: WASI has no `tmpnam`/`L_tmpnam`; (2) needs `-mllvm -wasm-enable-sjlj` because wasi-libc `<setjmp.h>` hard-errors without WebAssembly EH (Lua error handling is setjmp/longjmp) |
+| utf8proc | CMake + `wasi-toolchain.cmake` → `libutf8proc.a` | clean | its own `CMakeLists` builds a static lib cleanly |
+| tree-sitter core | CMake + `wasi-toolchain.cmake` → `libtree-sitter.a` | clean | `TREE_SITTER_FEATURE_WASM=OFF` (no wasmtime); its `CMakeLists` sets `_POSIX_C_SOURCE`/`_DEFAULT_SOURCE`, which is what makes `parser.c`'s `fdopen()` (debug dot-graph path) declare cleanly |
+| lpeg | direct clang → `liblpeg.a` | clean | compiled against our staged Lua headers |
+| unibilium | direct clang → `libunibilium.a` | clean | plain C; `-DTERMINFO_DIRS=...` supplied (matches its CMake default); runtime terminfo lookup is inert in the sandbox |
+| lua-compat53 | direct clang → `libluacompat53.a` | clean | header/source dep (luv consumes `LUA_COMPAT53_DIR` as source in Task 5/6); we compile `c-api/compat-5.3.c` as a wasm compile-proof and stage `compat-5.3.h` |
+| tree-sitter-c/lua/vim/vimdoc/query/markdown | direct clang → 6× `libtree-sitter-<lang>.a` | clean | generated `parser.c` (+ `scanner.c` where present); markdown bundles both block+inline grammars with prefixed object names |
+
+**Surprises / notes for later tasks:**
+
+- **SjLj is load-bearing for the whole Neovim link.** Neovim's own error
+  handling is longjmp-based, and it links against `liblua.a` built with
+  `-mllvm -wasm-enable-sjlj`. The Neovim object compile AND the final
+  executable link (rung 3/4) must use this same flag and an engine that
+  implements the WebAssembly exception-handling proposal (Node 24's WASI does).
+- **`io.tmpfile` / `fdopen` are compile-clean but may be link-unresolved.**
+  `liolib.c` (`io.tmpfile`) and tree-sitter `parser.c` (`fdopen`, dot-graph
+  debug) reference symbols wasi-libc declares-but-may-not-define. They compile
+  (warnings only) into the archives; if the final Neovim link fails on
+  undefined `tmpfile`/`fdopen`, stub them or dead-strip those code paths. Both
+  are non-essential (temp files / parser debug tracing).
+- **lpeg is a STATIC archive, no dynamic loading.** Under WASI there is no
+  `dlopen`; Neovim must register lpeg via `luaL_requiref`/preload of
+  `luaopen_lpeg` and link `liblpeg.a` statically (flagged for the Task 6 Lua
+  wiring). Same applies to the tree-sitter parser archives (loaded by symbol,
+  not `dlopen`).
+- **CMake 4.3 ships a builtin `Platform/WASI.cmake`**, so `wasi-toolchain.cmake`
+  did not need to inject the SDK's own cmake module path.
+- No dependency versions were overridden — all pins in `VERSIONS.md` stand.
+  `libvterm`/`libtermkey`/`msgpack-c` remain absent from the manifest (Task 3
+  finding); nothing to build for them here.
