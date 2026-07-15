@@ -304,13 +304,18 @@ Layered, TDD throughout:
 Reality checks from the spike — differences from the sections above that later
 milestones should treat as current truth:
 
-- **One build variant for now.** Only the Asyncify build is vendored and used
-  on BOTH surfaces (scratch page included). The threaded/SharedArrayBuffer
-  variant remains a Milestone 2+ optimization.
-- **Engine assets are fetched, not committed.** `npm run fetch-assets` pulls
-  `nvim-asyncify.wasm` + `nvim-runtime.tar.gz` (SHA-256-pinned) into gitignored
-  `vendor/`; the build copies them into `dist/chromium/`. Upstream nvim-wasm
-  has no license — see README; repo must stay private until resolved.
+- **One build variant for now.** Only the Asyncify build is used on BOTH
+  surfaces (scratch page included), whichever engine source is selected. The
+  threaded/SharedArrayBuffer variant remains a Milestone 2+ optimization.
+- **Engine assets are fetched or built, not committed.** By default the build
+  sources `nvim-asyncify.wasm` + `nvim-runtime.tar.gz` from the first-party
+  clean-room build in `nvim-wasm-prototype/dist/` (see that subproject's
+  README/STATUS.md for its build pipeline). The originally vendored,
+  fetched-and-unlicensed `nvim-wasm` engine remains available as a legacy
+  fallback (`npm run fetch-assets` into gitignored `vendor/`, then
+  `NVIM_ENGINE=vendored npm run build`); that upstream still has no license,
+  so repo/release visibility must stay private whenever that fallback is
+  used — see README.
 - **Engine host layout:** core driver lives in `src/engine/nvim-host.ts`
   (env-agnostic: WASI shims via @bjorn3/browser_wasi_shim, Asyncify driver,
   stdio fds); `src/engine/worker.ts` is a thin postMessage shell
@@ -318,13 +323,15 @@ milestones should treat as current truth:
   wakeups/sec every 5s, the idle-CPU instrument). `src/engine/rpc.ts` does
   msgpack-RPC framing; `src/engine/untar.ts` unpacks the runtime archive into
   the in-memory WASI FS (no persistence yet — Milestone 4).
-- **Timer-latency caveat:** the vendored binary busy-polls stdin with ~1ms
-  clock-only poll subscriptions; the driver achieves idle ≈ 0% via adaptive
-  backoff (cap 1s). Consequence: when idle >250ms, nvim-internal timers
-  (`timeoutlen` mappings, CursorHold) can fire up to ~1s late. Input latency
-  is unaffected (stdin wakes the driver out-of-band, measured ~3ms). Tunable
-  constants in nvim-host.ts; a future event-driven upstream build removes the
-  need.
+- **Timer-latency caveat (vendored engine only):** the vendored binary
+  busy-polls stdin with ~1ms clock-only poll subscriptions; the driver
+  achieves idle ≈ 0% via adaptive backoff (cap 1s). Consequence: when idle
+  >250ms, nvim-internal timers (`timeoutlen` mappings, CursorHold) can fire
+  up to ~1s late. Input latency is unaffected (stdin wakes the driver
+  out-of-band, measured ~3ms). Tunable constants in nvim-host.ts. The
+  default first-party clean-room engine subscribes `fd_read` on stdin
+  directly in `poll_oneoff`, so the host's adaptive backoff never engages —
+  idle is genuinely event-driven and this caveat does not apply.
 - **IME composition is NOT yet implemented** (composition keydowns are ignored
   via the "Process" key). Required before real long-form non-ASCII writing.
 - **Escape chord is double-guarded:** swallowed inside the frame AND at the
