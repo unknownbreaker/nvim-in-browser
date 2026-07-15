@@ -137,12 +137,23 @@ See `STATUS.md` for the full discovery log.
 - url: https://github.com/juliastrings/utf8proc/archive/v2.11.3.tar.gz
 - sha256: `abfed50b6d4da51345713661370290f4f4747263ee73dc90356299dfc7990c78`
 
-### unibilium
+### unibilium (REMOVED — no longer built or linked; LGPL-3.0)
 
 - version: `v2.1.2`
 - asset: `unibilium-v2.1.2.tar.gz`
 - url: https://github.com/neovim/unibilium/archive/v2.1.2.tar.gz
 - sha256: `370ecb07fbbc20d91d1b350c55f1c806b06bf86797e164081ccc977fc9b3af7a`
+- **status: REMOVED from the default build (2026-07-15).** unibilium is
+  **LGPL-3.0** and is used only by `src/nvim/tui/`, which our `--embed`
+  headless engine never runs; all its call sites fall back to Neovim's
+  in-tree BSD-licensed built-in terminfo tables under `#else` when
+  `HAVE_UNIBILIUM` is undefined. `build-nvim.sh` now configures nvim with
+  `-DENABLE_UNIBILIUM=OFF` and `build-deps.sh` no longer builds
+  `libunibilium.a` (dropped from `ALL_DEPS`; `build_unibilium()` deleted).
+  The pin is retained here only because `fetch-sources.sh` still fetches the
+  source from Neovim's own manifest; nothing compiles it. Dropping it makes
+  the produced binary cleanly permissive-licensed (no LGPL). See `STATUS.md`
+  (2026-07-15 Licensing Task entry).
 
 ### Manifest entries intentionally not fetched (see `SKIP_DEPS` in `scripts/fetch-sources.sh`)
 

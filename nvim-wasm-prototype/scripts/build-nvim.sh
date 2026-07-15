@@ -277,8 +277,7 @@ configure_nvim() {
     -DTREESITTER_LIBRARY="${LIB}/libtree-sitter.a" \
     -DUTF8PROC_INCLUDE_DIR="${INC}" \
     -DUTF8PROC_LIBRARY="${LIB}/libutf8proc.a" \
-    -DUNIBILIUM_INCLUDE_DIR="${INC}" \
-    -DUNIBILIUM_LIBRARY="${LIB}/libunibilium.a" \
+    -DENABLE_UNIBILIUM=OFF \
     -DICONV_INCLUDE_DIR="${SYSROOT_INC}"
   log "configure: done (${NVIM_BUILD})"
 }

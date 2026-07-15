@@ -8,7 +8,7 @@
 #   scripts/build-deps.sh lua treesitter ...   # build only the named deps
 #
 # Dep names (build order matters -- lua headers feed lpeg/lua-compat53):
-#   lua-host lua utf8proc treesitter lpeg unibilium lua-compat53 parsers
+#   lua-host lua utf8proc treesitter lpeg lua-compat53 parsers
 # "parsers" builds all six bundled tree-sitter grammars.
 #
 # Idempotent: each dep is skipped when its output artifact already exists, so
@@ -205,33 +205,12 @@ build_lpeg() {
   log "lpeg: built ${LIB}/liblpeg.a (static; loaded via luaL_requiref/preload in the wasm build -- no dynamic loading under WASI)"
 }
 
-# --- unibilium (wasm static lib) ---------------------------------------------
-build_unibilium() {
-  CURRENT_STEP="unibilium"
-  if [[ -f "${LIB}/libunibilium.a" ]]; then
-    log "unibilium: already built, skipping"
-    return 0
-  fi
-  local w="${WORK}/unibilium"
-  rm -rf "${w}"
-  mkdir -p "${w}"
-  # TERMINFO_DIRS is where unibilium looks for compiled terminfo at runtime;
-  # its own CMakeLists defaults to this same list. Irrelevant inside the wasm
-  # sandbox (no filesystem terminfo), but the macro must be defined to compile.
-  local terminfo='"/etc/terminfo:/lib/terminfo:/usr/share/terminfo"'
-  local files=(unibilium uninames uniutil)
-  local objs=() f
-  for f in "${files[@]}"; do
-    "${CC}" "${WASI_CFLAGS[@]}" -DTERMINFO_DIRS="${terminfo}" \
-      -I"${SRC}/unibilium" \
-      -c "${SRC}/unibilium/${f}.c" -o "${w}/${f}.o"
-    objs+=("${w}/${f}.o")
-  done
-  "${AR}" rcu "${LIB}/libunibilium.a" "${objs[@]}"
-  "${RANLIB}" "${LIB}/libunibilium.a"
-  cp "${SRC}/unibilium/unibilium.h" "${INC}/"
-  log "unibilium: built ${LIB}/libunibilium.a (+ staged unibilium.h)"
-}
+# NOTE: unibilium (a terminfo-DB parser, LGPL-3.0) was removed. It is used
+# ONLY by src/nvim/tui/, and our engine runs --embed with no TUI. Neovim's
+# TUI call sites fall back to in-tree BSD-licensed built-in terminfo tables
+# under `#else` when HAVE_UNIBILIUM is undefined. build-nvim.sh now configures
+# nvim with -DENABLE_UNIBILIUM=OFF, so nothing links it. Dropping it keeps the
+# produced binary cleanly permissive-licensed (no LGPL).
 
 # --- lua-compat53 (wasm static lib; normally consumed as source by luv) ------
 # lua-compat53 backports the Lua 5.3/5.4 C API onto 5.1. Neovim consumes it via
@@ -458,7 +437,7 @@ build_parsers() {
 
 # --- dispatch ----------------------------------------------------------------
 
-ALL_DEPS=(lua-host lua utf8proc treesitter lpeg unibilium lua-compat53 parsers libuv luv)
+ALL_DEPS=(lua-host lua utf8proc treesitter lpeg lua-compat53 parsers libuv luv)
 
 build_one() {
   case "$1" in
@@ -467,7 +446,6 @@ build_one() {
     utf8proc)      build_utf8proc ;;
     treesitter)    build_treesitter ;;
     lpeg)          build_lpeg ;;
-    unibilium)     build_unibilium ;;
     lua-compat53)  build_lua_compat53 ;;
     libuv)         build_libuv ;;
     luv)           build_luv ;;
