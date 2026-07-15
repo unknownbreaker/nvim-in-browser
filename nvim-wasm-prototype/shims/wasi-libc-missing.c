@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <ifaddrs.h>
 #include <net/if.h>
 #include <netdb.h>
 #include <pwd.h>
@@ -233,6 +234,32 @@ gid_t getgid(void) { return 0; }
 gid_t getegid(void) { return 0; }
 pid_t getppid(void) { return 0; }
 
+/* No identity switching in the sandbox (luv's misc.c setuid/setgid
+ * bindings): fail honestly with EPERM. */
+int setuid(uid_t uid) {
+  (void) uid;
+  errno = EPERM;
+  return -1;
+}
+
+int setgid(gid_t gid) {
+  (void) gid;
+  errno = EPERM;
+  return -1;
+}
+
+/* No protocol database in the sandbox (luv's constants.c): NULL means
+ * "unknown protocol", which the bindings surface as nil. */
+struct protoent* getprotobyname(const char* name) {
+  (void) name;
+  return NULL;
+}
+
+struct protoent* getprotobynumber(int proto) {
+  (void) proto;
+  return NULL;
+}
+
 /* --- scheduling introspection (single thread, no scheduler) ---------------- */
 
 int sched_get_priority_max(int policy) {
@@ -295,6 +322,19 @@ int setpriority(int which, id_t who, int prio) {
 }
 
 /* --- network interfaces (none exist in the sandbox) ------------------------ */
+
+/* Declared by wasi-libc's own <ifaddrs.h> but absent from libc.a. No
+ * network interfaces exist in the sandbox; libuv's tcp.c only consults
+ * this for IPv6 link-local scope ids and treats failure as scope 0. */
+int getifaddrs(struct ifaddrs** ifap) {
+  (void) ifap;
+  errno = ENOSYS;
+  return -1;
+}
+
+void freeifaddrs(struct ifaddrs* ifa) {
+  (void) ifa;
+}
 
 unsigned int if_nametoindex(const char* name) {
   (void) name;

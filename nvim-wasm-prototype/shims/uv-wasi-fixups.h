@@ -151,6 +151,8 @@ uid_t getuid(void);
 uid_t geteuid(void);
 gid_t getgid(void);
 gid_t getegid(void);
+int setuid(uid_t);
+int setgid(gid_t);
 
 /* Resource limits / priorities: wasip1's <sys/resource.h> only carries the
  * emulated rusage bits; everything below is hidden upstream musl surface.

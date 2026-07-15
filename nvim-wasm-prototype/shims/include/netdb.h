@@ -80,6 +80,17 @@ int getnameinfo(const struct sockaddr *__restrict, socklen_t,
                 int);
 const char *gai_strerror(int);
 
+/* Protocol database (luv's constants.c getprotobyname/getprotobynumber
+ * bindings). No /etc/protocols exists in the sandbox; the lookups in
+ * shims/wasi-libc-missing.c always return NULL (honest "unknown"). */
+struct protoent {
+  char *p_name;
+  char **p_aliases;
+  int p_proto;
+};
+struct protoent *getprotobyname(const char *);
+struct protoent *getprotobynumber(int);
+
 #ifdef __cplusplus
 }
 #endif

@@ -71,22 +71,29 @@ ensure_dirs() {
 
 # --- lua (native host build) -------------------------------------------------
 # Neovim's build runs host lua/luac for codegen, so this is a NATIVE compile
-# with the system toolchain, not a wasm one. The "generic" platform target
-# needs no readline/posix extras, so it builds clean on macOS.
+# with the system toolchain, not a wasm one. Compiled with LUA_USE_POSIX +
+# LUA_USE_DLOPEN (the flags lua's own "bsd" platform target uses, minus the
+# GNU-ld-only "-Wl,-E"): Neovim's code generators load a native helper module
+# (nlua0.so, built by build-nvim.sh) via package.cpath, which requires
+# dlopen support in the host interpreter. On macOS dlopen lives in libSystem,
+# so no extra MYLIBS are needed. The marker file records that the installed
+# binaries were built with dlopen so pre-dlopen builds get refreshed.
 build_lua_host() {
   CURRENT_STEP="lua-host"
-  if [[ -x "${HOSTBIN}/lua" && -x "${HOSTBIN}/luac" ]]; then
+  local marker="${BUILD}/host/.lua-host-dlopen"
+  if [[ -x "${HOSTBIN}/lua" && -x "${HOSTBIN}/luac" && -f "${marker}" ]]; then
     log "lua-host: already built (${HOSTBIN}/lua, luac), skipping"
     return 0
   fi
   local w="${WORK}/lua-host"
   rm -rf "${w}"
   cp -R "${SRC}/lua" "${w}"
-  make -C "${w}" clean >/dev/null 2>&1 || true
-  make -C "${w}" generic
+  make -C "${w}/src" clean >/dev/null 2>&1 || true
+  make -C "${w}/src" all MYCFLAGS="-DLUA_USE_POSIX -DLUA_USE_DLOPEN"
   cp "${w}/src/lua" "${HOSTBIN}/lua"
   cp "${w}/src/luac" "${HOSTBIN}/luac"
-  log "lua-host: built ${HOSTBIN}/lua and ${HOSTBIN}/luac"
+  touch "${marker}"
+  log "lua-host: built ${HOSTBIN}/lua and ${HOSTBIN}/luac (with dlopen support)"
 }
 
 # --- lua (wasm32-wasi static lib) --------------------------------------------
@@ -353,6 +360,46 @@ build_libuv() {
   log "libuv: built ${LIB}/libuv.a (+ staged patched uv headers + shim headers)"
 }
 
+# --- luv (wasm static lib: Neovim's vim.uv Lua binding over libuv) -----------
+# luv's src/luv.c is a single translation unit that #includes every other
+# src/*.c file, so one compile produces the whole module (this mirrors luv's
+# own CMakeLists, which lists src/luv.c as the only source). Compiled against
+# our staged lua + patched uv headers and lua-compat53 (luv.c includes
+# compat-5.3.h when LUA_VERSION_NUM < 503; the matching compat-5.3.c objects
+# live in libluacompat53.a, linked at the final Neovim link). Headers are
+# staged under include/luv/ because Neovim includes "luv/luv.h".
+build_luv() {
+  CURRENT_STEP="luv"
+  if [[ -f "${LIB}/libluv.a" ]]; then
+    log "luv: already built (${LIB}/libluv.a), skipping"
+    return 0
+  fi
+  [[ -f "${INC}/lua.h" ]] || die "luv needs staged lua headers; build 'lua' first"
+  [[ -f "${INC}/uv.h" ]] || die "luv needs staged libuv headers; build 'libuv' first"
+  [[ -f "${INC}/compat-5.3.h" ]] || die "luv needs compat-5.3.h; build 'lua-compat53' first"
+  local w="${WORK}/luv"
+  rm -rf "${w}"
+  mkdir -p "${w}"
+  # Same sjlj story as lua: luv's Lua glue runs inside lua_pcall frames, and
+  # every consumer of wasi-libc <setjmp.h> needs the flag to compile. luv
+  # touches the same hidden-on-wasi POSIX surface libuv does (getuid,
+  # getprotobyname, ...), so it gets the same shim include dir + force-included
+  # fixups header; the matching stub definitions live in libuv.a
+  # (shims/wasi-libc-missing.c).
+  "${CC}" "${WASI_CFLAGS[@]}" -mllvm -wasm-enable-sjlj \
+    -D_GNU_SOURCE \
+    -I"${PROTO_ROOT}/shims/include" \
+    -include "${PROTO_ROOT}/shims/uv-wasi-fixups.h" \
+    -I"${INC}" -I"${SRC}/lua-compat53/c-api" \
+    -c "${SRC}/luv/src/luv.c" -o "${w}/luv.o"
+  "${AR}" rcu "${LIB}/libluv.a" "${w}/luv.o"
+  "${RANLIB}" "${LIB}/libluv.a"
+  mkdir -p "${INC}/luv"
+  cp "${SRC}/luv/src/luv.h" "${SRC}/luv/src/lhandle.h" "${SRC}/luv/src/lreq.h" \
+     "${SRC}/luv/src/lthreadpool.h" "${SRC}/luv/src/util.h" "${INC}/luv/"
+  log "luv: built ${LIB}/libluv.a (+ staged luv headers)"
+}
+
 # --- one tree-sitter grammar -> one static archive ---------------------------
 # Args: <libname> then one or more "<src-dir>:<prefix>" specs. Each spec
 # compiles parser.c (always) and scanner.c (if present) from <src-dir>/src,
@@ -411,7 +458,7 @@ build_parsers() {
 
 # --- dispatch ----------------------------------------------------------------
 
-ALL_DEPS=(lua-host lua utf8proc treesitter lpeg unibilium lua-compat53 parsers libuv)
+ALL_DEPS=(lua-host lua utf8proc treesitter lpeg unibilium lua-compat53 parsers libuv luv)
 
 build_one() {
   case "$1" in
@@ -423,6 +470,7 @@ build_one() {
     unibilium)     build_unibilium ;;
     lua-compat53)  build_lua_compat53 ;;
     libuv)         build_libuv ;;
+    luv)           build_luv ;;
     parsers)       build_parsers ;;
     ts-c)          build_ts_c ;;
     ts-lua)        build_ts_lua ;;
