@@ -21,8 +21,8 @@ import { fileURLToPath } from "node:url";
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const IDLE_SECONDS = Number(process.argv[2] ?? 10);
 
-const wasmPath = process.env.NVIM_WASM_PATH ?? path.join(root, "vendor", "nvim-wasm", "nvim-asyncify.wasm");
-const runtimePath = process.env.NVIM_RUNTIME_PATH ?? path.join(root, "vendor", "nvim-wasm", "nvim-runtime.tar.gz");
+const wasmPath = process.env.NVIM_WASM_PATH ?? path.join(root, "vendor", "nvim-wasi", "nvim-asyncify.wasm");
+const runtimePath = process.env.NVIM_RUNTIME_PATH ?? path.join(root, "vendor", "nvim-wasi", "nvim-runtime.tar.gz");
 
 function fail(msg) {
   console.error("SMOKE FAIL:", msg);

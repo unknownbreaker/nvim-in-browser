@@ -1,0 +1,14 @@
+{
+  "repo": "unknownbreaker/nvim-wasi",
+  "tag": "v0.1.0",
+  "files": [
+    {
+      "name": "nvim-asyncify.wasm",
+      "sha256": "994af096b7389317b7371af5d0a7915a20b1b2356e790c6631fc97afa6911d84"
+    },
+    {
+      "name": "nvim-runtime.tar.gz",
+      "sha256": "e88050543fe2a53d7f741e9c6c461cdb9cf77bae5efed9f3a86602037215b9b7"
+    }
+  ]
+}

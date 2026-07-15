@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "fetch-assets": "node scripts/fetch-nvim-wasm.mjs",
+    "fetch-assets": "node scripts/fetch-engine.mjs",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.worker.json"
   },
