@@ -1,0 +1,42 @@
+# patches/neovim-embed-stdio.patch
+#
+# WHAT: The first (and only) genuine Neovim source patch of this port: skip
+# the --embed stdio redirect in channel_from_stdio() when compiling for WASI.
+#
+# WHY: On POSIX, embedded nvim moves the RPC fds away from 0/1 with
+# fcntl(F_DUPFD_CLOEXEC) and then points fds 0/1 at stderr with dup2(), so
+# that (a) child processes never inherit the UI channel fds and (b) stray
+# writes to stdout cannot corrupt the msgpack-RPC stream. WASI preview1 has
+# no fd-duplication primitive at all (fd_renumber MOVES an fd; there is no
+# dup), so fcntl(F_DUPFD_CLOEXEC) fails under wasi-libc and the channel
+# would be initialized with fd -1 — the rung-5 blocker recorded in
+# STATUS.md. The redirect is also pointless inside the sandbox: preview1
+# has no processes to inherit fds and no other writer that could race the
+# RPC stream. A new #elif defined(__wasi__) branch keeps fds 0/1 as the
+# channel endpoints, which is exactly what the wasm host wires up.
+#
+# Alternatives considered and rejected: implementing F_DUPFD in the shim
+# layer is impossible to do honestly (fd_renumber invalidates the source
+# fd; faking an alias fd would require intercepting every subsequent
+# read/write/poll/close at the libc boundary).
+#
+# CLEAN-ROOM PROVENANCE: derived solely from Neovim v0.12.4 sources
+# (src/nvim/channel.c, vendored in src-cache/neovim), the WASI preview1
+# spec (fd_renumber semantics), and wasi-libc's fcntl implementation. No
+# excluded project (MuNeNICK/nvim-wasm or monaco-neovim-wasm) was consulted
+# in any form.
+#
+--- a/src/nvim/channel.c
++++ b/src/nvim/channel.c
+@@ -581,6 +581,11 @@
+     os_replace_stdin_to_conin();
+     os_replace_stdout_and_stderr_to_conout();
+   }
++#elif defined(__wasi__)
++  // WASI (preview1) has no dup()/F_DUPFD and no child processes, so the fd
++  // redirect below is impossible (fcntl(F_DUPFD_CLOEXEC) returns -1, handing
++  // the RPC channel a dead fd) and also unnecessary: nothing can inherit the
++  // fds and no other writer exists inside the sandbox. Keep fds 0/1 directly.
+ #else
+   if (embedded_mode) {
+     // Redirect stdout/stdin (the UI channel) to stderr. Use fnctl(F_DUPFD_CLOEXEC) instead of dup()

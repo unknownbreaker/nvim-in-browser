@@ -5,7 +5,7 @@
 # Usage:
 #   scripts/build-nvim.sh              # all steps (skips ones already done)
 #   scripts/build-nvim.sh <step>...    # only the named steps
-# Steps (in order): host-nlua0 shim configure build verify
+# Steps (in order): patch host-nlua0 shim configure build verify
 #
 # Prerequisites: scripts/fetch-sources.sh and scripts/build-deps.sh have run
 # (build/deps holds the wasm archives + staged headers, build/host/bin the
@@ -82,6 +82,25 @@ require_deps() {
   [[ -x "${HOSTBIN}/lua" ]] || die "missing host lua; run scripts/build-deps.sh"
 }
 
+# --- patch: the one genuine Neovim source patch --------------------------------
+# patches/neovim-embed-stdio.patch guards channel_from_stdio()'s --embed fd
+# redirect under !__wasi__ (preview1 has no dup; the redirect would hand the
+# RPC channel fd -1). See the patch header for the full rationale. Applied
+# in place to src-cache/neovim (fetch-sources.sh re-extracts pristine trees
+# only on version bumps); a grep guard keeps this idempotent.
+apply_nvim_patches() {
+  CURRENT_STEP="patch"
+  local marker='#elif defined(__wasi__)'
+  if grep -qF "${marker}" "${NVIM_SRC}/src/nvim/channel.c"; then
+    log "patch: neovim-embed-stdio.patch already applied, skipping"
+    return 0
+  fi
+  patch -p1 -d "${NVIM_SRC}" < "${PROTO_ROOT}/patches/neovim-embed-stdio.patch"
+  grep -qF "${marker}" "${NVIM_SRC}/src/nvim/channel.c" \
+    || die "patch applied but marker not found in channel.c"
+  log "patch: applied patches/neovim-embed-stdio.patch"
+}
+
 # --- host-nlua0: native helper module for Neovim's code generators -----------
 # Neovim's generators (src/gen/*.lua) run under a host Lua and `require
 # 'nlua0'` -- a C module bundling vim.mpack, vim.lpeg and (for PUC Lua) the
@@ -143,7 +162,10 @@ build_shim() {
   CURRENT_STEP="shim"
   local out="${LIB}/libnvim-wasi-shim.a"
   local src="${SHIMS}/nvim-wasi-stubs.c"
-  if [[ -f "${out}" && "${out}" -nt "${src}" ]]; then
+  local async_out="${LIB}/nvim-wasi-asyncify.o"
+  local async_src="${SHIMS}/nvim-wasi-asyncify.c"
+  if [[ -f "${out}" && "${out}" -nt "${src}" \
+        && -f "${async_out}" && "${async_out}" -nt "${async_src}" ]]; then
     log "shim: already built (${out}), skipping"
     return 0
   fi
@@ -157,13 +179,21 @@ build_shim() {
     -c "${src}" -o "${w}/nvim-wasi-stubs.o"
   "${AR_WASI}" rcu "${out}" "${w}/nvim-wasi-stubs.o"
   "${RANLIB_WASI}" "${out}"
-  log "shim: built ${out}"
+  # The asyncify scratch-region exports stay a bare OBJECT (not an archive
+  # member): nothing references them, so archive extraction would drop them
+  # and the exports the parent host requires would silently vanish.
+  "${CC_WASI}" --target=wasm32-wasi -O2 -fno-common \
+    -c "${async_src}" -o "${async_out}"
+  log "shim: built ${out} + ${async_out}"
 }
 
 # --- configure: Neovim CMake with the wasi toolchain --------------------------
 configure_nvim() {
   CURRENT_STEP="configure"
-  if [[ -f "${NVIM_BUILD}/build.ninja" ]]; then
+  # Reconfigure when this script itself changed (cache vars live here), not
+  # just when build.ninja is missing.
+  if [[ -f "${NVIM_BUILD}/build.ninja" \
+        && "${NVIM_BUILD}/build.ninja" -nt "${BASH_SOURCE[0]}" ]]; then
     log "configure: already configured (${NVIM_BUILD}/build.ninja), skipping"
     return 0
   fi
@@ -187,6 +217,9 @@ configure_nvim() {
   local stdlibs="-lwasi-emulated-signal -lwasi-emulated-process-clocks"
   stdlibs+=" -lwasi-emulated-mman -lwasi-emulated-getpid -lsetjmp"
   stdlibs+=" ${LIB}/libluacompat53.a ${LIB}/libnvim-wasi-shim.a"
+  # Bare object (always linked, unlike archive members): the asyncify
+  # scratch-region exports the parent host discovers at boot.
+  stdlibs+=" ${LIB}/nvim-wasi-asyncify.o"
 
   cmake -S "${NVIM_SRC}" -B "${NVIM_BUILD}" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" \
@@ -223,13 +256,24 @@ configure_nvim() {
 # --- build: the actual compile + link ----------------------------------------
 build_nvim() {
   CURRENT_STEP="build"
-  if [[ -f "${NVIM_BUILD}/bin/nvim" ]]; then
-    log "build: ${NVIM_BUILD}/bin/nvim already exists, skipping (delete to rebuild)"
-    return 0
+  # Ninja's graph does not track our out-of-tree link inputs (the
+  # CMAKE_C_STANDARD_LIBRARIES archives/objects in build/deps/lib), so force
+  # a relink whenever any of them is newer than the binary. Then always run
+  # ninja: it is a fast no-op when everything is current.
+  local bin="${NVIM_BUILD}/bin/nvim"
+  if [[ -f "${bin}" ]]; then
+    local f
+    for f in "${LIB}"/*.a "${LIB}"/*.o; do
+      if [[ -e "${f}" && "${f}" -nt "${bin}" ]]; then
+        log "build: ${f} is newer than bin/nvim; forcing relink"
+        rm -f "${bin}"
+        break
+      fi
+    done
   fi
   cmake --build "${NVIM_BUILD}" --target nvim_bin
-  [[ -f "${NVIM_BUILD}/bin/nvim" ]] || die "ninja succeeded but ${NVIM_BUILD}/bin/nvim is missing"
-  log "build: linked ${NVIM_BUILD}/bin/nvim"
+  [[ -f "${bin}" ]] || die "ninja succeeded but ${bin} is missing"
+  log "build: linked ${bin}"
 }
 
 # --- verify: rung-4 acceptance gate -------------------------------------------
@@ -259,10 +303,11 @@ verify_nvim() {
 
 # --- dispatch ------------------------------------------------------------------
 
-ALL_STEPS=(host-nlua0 shim configure build verify)
+ALL_STEPS=(patch host-nlua0 shim configure build verify)
 
 run_step() {
   case "$1" in
+    patch)      apply_nvim_patches ;;
     host-nlua0) build_host_nlua0 ;;
     shim)       build_shim ;;
     configure)  configure_nvim ;;
