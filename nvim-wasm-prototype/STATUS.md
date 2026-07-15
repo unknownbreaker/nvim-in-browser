@@ -662,9 +662,12 @@ ABSOLUTE path ending in `nvim`.
 path `"/nvim/bin/nvim"`**, honoring libuv's contract (`*size` in/out: in =
 buffer capacity, out = bytes written excluding NUL; NUL-terminates; copies
 only what fits leaving room for the NUL; `UV_EINVAL` on NULL buffer/size or
-zero capacity). The path is chosen to be consistent with the host's `/nvim`
-preopen convention; it need not name a real file — nvim only needs an
-absolute, nvim-tailed string for `v:progpath`/`v:progname`. The file's WHY
+zero capacity). The path is purely synthetic — hosts differ in preopen layout
+(the parent host mounts everything at `/`) and no `/nvim` preopen is required;
+it need not name a real file — nvim only needs an
+absolute, nvim-tailed string for `v:progpath`/`v:progname`.
+*(Correction 2026-07-15: an earlier version of this entry claimed consistency
+with a host `/nvim` preopen convention; no such convention exists.)* The file's WHY
 header comment was updated to document the choice and drop exepath from the
 ENOSYS list. **This closes the rung-4/5 carry-forward "`uv_exepath` ENOSYS →
 `v:progpath` empty".**
@@ -967,3 +970,8 @@ archives built but not linked" open item.**
   failure this would cause).
 - Tree-sitter grammars are always-linked (+2.8MB asyncified, binary now
   +29% vs vendored); make them build-time opt-in if size matters.
+- `vim.uv` can still write to fd 1 deliberately (e.g.
+  `vim.uv.new_pipe():open(1)` + write) and corrupt the RPC stream. Unlike
+  the accidental `io.write()` footgun (fixed), this requires explicit
+  intent and is indistinguishable from it — accepted residual, revisit only
+  if hostile-config isolation ever becomes a goal.

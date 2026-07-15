@@ -13,8 +13,9 @@
  * $PATH in the sandbox copies the bare argv[0] ("nvim") into v:progpath —
  * a non-absolute string that breaks parity with a native nvim and any
  * runtime logic that treats v:progpath as a real path. Instead we synthesize
- * a STABLE, ABSOLUTE path "/nvim/bin/nvim", chosen to be consistent with the
- * host's "/nvim" preopen convention (the runtime tree the embedder mounts).
+ * a STABLE, ABSOLUTE path "/nvim/bin/nvim". The path is purely synthetic —
+ * hosts differ in preopen layout (the parent host mounts everything at "/")
+ * and no host needs a "/nvim" preopen for this to work.
  * It is not a file that must exist; nvim only needs an absolute, nvim-tailed
  * string for v:progpath/v:progname. Memory queries return
  * real, if coarse, numbers derived from the wasm linear memory
@@ -39,7 +40,7 @@
 #include <unistd.h>
 
 /* Synthetic, stable executable path for the wasm sandbox. Absolute and
- * nvim-tailed, consistent with the host's "/nvim" preopen convention. */
+ * nvim-tailed; purely synthetic, independent of any host preopen layout. */
 #define UV__WASI_EXEPATH "/nvim/bin/nvim"
 
 /* wasm32 linear memory: pages are 64 KiB; address space caps at 4 GiB. */
