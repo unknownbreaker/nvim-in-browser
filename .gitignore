@@ -8,7 +8,3 @@ vendor/
 chrome/
 *.log
 .DS_Store
-nvim-wasm-prototype/.toolchain/
-nvim-wasm-prototype/build/
-nvim-wasm-prototype/src-cache/
-nvim-wasm-prototype/dist/
