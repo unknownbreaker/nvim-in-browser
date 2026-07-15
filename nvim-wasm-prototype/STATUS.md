@@ -611,3 +611,67 @@ browser/overlay smokes against our binary not yet run.
 - The packaged runtime tarball is unpruned: it ships the full source
   `runtime/` tree (docs, tutor, etc.), ~2.3% larger than the vendored
   engine's tarball. Pruning unused subtrees is an easy size win for later.
+
+### 2026-07-15 — Parity Task 1: parity gate harness + synthetic uv_exepath
+
+**Gate green:** `node test/parity-check.mjs dist/nvim-asyncify.wasm
+dist/nvim-runtime.tar.gz` prints `PASS progpath: v:progpath =
+"/nvim/bin/nvim"` then **PARITY PASS** (exit 0). `bash scripts/smoke.sh`
+still **SMOKE PASS**; `bash test/uv-smoke.sh` still green (link-all +
+case A/B).
+
+**New harness — `test/parity-check.mjs`** (added to the test inventory):
+a STANDALONE parity gate that boots our `--embed` nvim under the same WASI +
+Asyncify arrangement as the parent host and drives it over msgpack-RPC to
+assert observable behaviours a native nvim exhibits. Usage:
+`node test/parity-check.mjs <wasm> <runtime-tarball>`; prints a PASS/FAIL
+line per check plus `PARITY PASS`/`PARITY FAIL`; exits nonzero on any
+failure. Checks live in a `CHECKS = [{ name, fn(rpc) }]` array so later
+parity tasks append entries; the runner runs whatever checks exist. It
+imports NOTHING from the parent `src/engine/*` — it re-implements inline the
+small pieces it needs (the poll_oneoff Asyncify driver, a ustar reader, and
+msgpack-RPC framing), mirroring the parent's boot pattern per the clean-room
+standalone constraint. Its only third-party imports are
+`@bjorn3/browser_wasi_shim` and `@msgpack/msgpack`, both resolved from the
+parent repo's `node_modules` via normal upward module resolution (works from
+any cwd).
+
+**Check 1 — `progpath`:** asserts `nvim_eval("v:progpath")` is a non-empty
+ABSOLUTE path ending in `nvim`.
+
+- **Failing-first observed value was NOT the empty string the brief
+  predicted — it was the bare `"nvim"`.** With `uv_exepath` returning
+  ENOSYS, neovim's `init_path()` (`main.c`) falls back to
+  `path_guess_exepath()` (`path.c`), which — because the sandbox has no
+  `$PATH` env — copies `argv[0]` ("nvim") verbatim. So a mere "non-empty,
+  ends-in-nvim" check would have passed against the bug. The check therefore
+  additionally requires an **absolute** path, which is the real parity
+  property (a native nvim exposes the absolute exe path) and the whole point
+  of a synthetic exepath. Pre-fix: `FAIL progpath: v:progpath is not an
+  absolute path: "nvim"` (exit 1). Post-fix: `PASS ... "/nvim/bin/nvim"`.
+
+**Fix — `uv_exepath` in `shims/uv-wasi-platform.c`:** was
+`if (bad args) UV_EINVAL; else UV_ENOSYS;`. Now returns a **stable synthetic
+path `"/nvim/bin/nvim"`**, honoring libuv's contract (`*size` in/out: in =
+buffer capacity, out = bytes written excluding NUL; NUL-terminates; copies
+only what fits leaving room for the NUL; `UV_EINVAL` on NULL buffer/size or
+zero capacity). The path is chosen to be consistent with the host's `/nvim`
+preopen convention; it need not name a real file — nvim only needs an
+absolute, nvim-tailed string for `v:progpath`/`v:progname`. The file's WHY
+header comment was updated to document the choice and drop exepath from the
+ENOSYS list. **This closes the rung-4/5 carry-forward "`uv_exepath` ENOSYS →
+`v:progpath` empty".**
+
+**Rebuild mechanics:** `uv_exepath` lives in a libuv shim compiled into
+`libuv.a` by `build-deps.sh`, whose `build_libuv()` skips when `libuv.a`
+already exists (no shim-change detection). So the rebuild path is: delete
+`build/deps/lib/libuv.a` → `bash scripts/build-deps.sh libuv` (re-applies
+`libuv-wasi.patch` idempotently on a fresh extract) → `bash
+scripts/build-nvim.sh` (force-relinks because the archive is newer than
+`bin/nvim`; ninja compile is otherwise a no-op) → `bash scripts/asyncify.sh`.
+Relinked `bin/nvim` = 5,983,592 B; asyncified `dist/nvim-asyncify.wasm` =
+8,040,838 B.
+
+**Still open (unchanged):** the user-Lua `io.write` RPC-corruption known
+limitation above; tree-sitter parser archives built but not linked;
+browser/overlay smokes not yet run.
