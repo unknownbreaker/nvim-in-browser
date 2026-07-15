@@ -8,7 +8,7 @@ failed experiments get recorded, not erased.
 - [x] 1. Toolchain fetch + hello-world C compiles to wasm32-wasi and runs in Node.
 - [x] 2. Leaf deps compile (utf8proc, treesitter, lua 5.1, …). Host lua/luac built.
 - [x] 3. libuv compiles against our shim layer (links, symbols resolved).
-- [ ] 4. Neovim objects compile; binary links.
+- [x] 4. Neovim objects compile; binary links.
 - [ ] 5. `_start` reaches first `poll_oneoff` under the parent engine host.
 - [ ] 6. `--embed` handshake: answers `nvim_ui_attach`.
 - [ ] 7. Buffer edit round-trip via RPC.
@@ -351,3 +351,134 @@ duplicate-symbol error above against the unfixed shim; re-ran
 `bash scripts/build-deps.sh` (full, from scratch) and `bash test/uv-smoke.sh`
 after all four fixes — link-all check, case A-immediate, and case B-delayed
 all green, exit 0.
+
+### 2026-07-15 — Task 6: Neovim v0.12.4 compiles and LINKS for wasm32-wasi (rung 4)
+
+**Gate green:** `scripts/build-nvim.sh` produces
+`build/nvim/bin/nvim` = **5,983,467 bytes** (wasm32 module, pre-asyncify,
+pre-wasm-opt). `llvm-objdump --file-headers` prints `file format wasm`
+(note: llvm-objdump then exits nonzero on ANY *linked* wasm module — it
+deep-dumps only wasm object files; it does the same on rung 1's known-good
+hello.wasm, so the verify step asserts on the format line and defers real
+validation to Node). `node test/check-module.mjs build/nvim/bin/nvim`:
+`WebAssembly.compile` OK, exports = `_start` (function) + `memory` — PASS.
+Re-run of `build-nvim.sh` is an all-"skipping" no-op (idempotent; the ninja
+step resumes mid-build after a fixed error, which is exactly how the
+compile-error grind was iterated).
+
+**Bonus curiosity run (single, rung 5 unchanged):**
+`node test/run-wasi.mjs build/nvim/bin/nvim -- --version` prints
+`NVIM v0.12.4 / Build type: Release / Lua 5.1` and exits 0 under Node 24's
+WASI. Full startup (`--embed`) is rung 5's job.
+
+**PUC-Lua checkpoint (resolved, no patches):** v0.12.4 retains first-class
+PUC Lua support: `PREFER_LUA=ON` selects `find_package(Lua 5.1 EXACT)`,
+defines `NVIM_VENDOR_BIT`, and compiles the vendored `src/bit.c` into the
+binary (registered by `lua/stdlib.c`); LuaJIT is then only wanted for unit
+tests, which auto-skip. lpeg and luv are statically linked and registered
+by direct `luaopen_lpeg`/`luaopen_luv` calls in upstream code — nvim's own
+design, no preload patching needed (this closes the rung-2 "static lpeg"
+carry-forward; tree-sitter *parser* archives are a different story, below).
+
+**Patch inventory: ZERO patches to Neovim source or build system.** The
+entire port landed via shims, headers, and CMake cache variables:
+
+| piece | what/why (one line each) |
+| --- | --- |
+| `scripts/build-nvim.sh` (new) | steps host-nlua0 → shim → configure → build → verify; resumable, per-step skip |
+| `shims/nvim-wasi-fixups.h` (new) | force-included into every nvim TU: declares the fork/exec/pty/sigmask surface wasi-libc hides (`dup`/`dup2`, `F_DUPFD_CLOEXEC`, `umask`, `execvp`, `setsid`, `kill`, `pthread_exit`, `ptsname`, `killpg`, `sigemptyset`&co, `SIG_SETMASK`) |
+| `shims/nvim-wasi-stubs.c` → `libnvim-wasi-shim.a` | honest-failure definitions: `openpty`/`forkpty`/`setsid`/`execvp`/`kill`/`wait`/`waitpid`/`ptsname`/`killpg` (ENOSYS/ECHILD), `pthread_exit` (loud abort; only reachable from a luv thread that can never exist), `umask` (no-op 022), `tmpfile` (NULL), `system` (NULL→0 "no shell", else ENOSYS) |
+| `shims/include/sys/ioctl.h` (new) | shadows wasi-libc's: keeps its FIONREAD/FIONBIO values, adds `struct winsize` + TIOCSWINSZ/TIOCSCTTY (PtyProc embeds winsize by value) |
+| `shims/include/sys/wait.h` (new) | wasi-libc ships none; waitpid + W* status macros for pty_proc_unix.c |
+| `shims/include/pty.h` (new) | forkpty/openpty prototypes (nvim's platform-header `#else` branch lands here) |
+| `shims/include/netdb.h` (extended) | + `struct protoent`, `getprotobyname`/`getprotobynumber` (luv's constants.c) |
+| `shims/uv-wasi-fixups.h` (extended) | + `setuid`/`setgid` declarations (luv's misc.c) |
+| `shims/wasi-libc-missing.c` (extended) | + `setuid`/`setgid` (EPERM), `getprotoby*` (NULL), `getifaddrs`/`freeifaddrs` (ENOSYS; declared by wasi-libc's own ifaddrs.h but absent from libc.a — libuv tcp.c's IPv6 scope-id lookup) |
+| `scripts/build-deps.sh` (extended) | `lua-host` now built with `-DLUA_USE_POSIX -DLUA_USE_DLOPEN` (generators dlopen nlua0.so; marker file forces one-time rebuild); new `luv` target (single-TU `src/luv.c` vs staged lua+uv headers + compat-5.3, sjlj flag) |
+| `test/check-module.mjs` (new) | rung-4 gate: WebAssembly.compile + `_start`/memory export assertions |
+
+**CMake option set used** (see `configure_nvim` in build-nvim.sh):
+`CMAKE_TOOLCHAIN_FILE=wasi-toolchain.cmake`, `CMAKE_BUILD_TYPE=Release`,
+`PREFER_LUA=ON`, `COMPILE_LUA=OFF`, `ENABLE_LIBINTL=OFF`, `ENABLE_LTO=OFF`
+(wasmtime/translations already default-OFF, unibilium default-ON),
+`DEPS_PREFIX=build/deps` + `CMAKE_FIND_ROOT_PATH=build/deps`, every dep
+pinned via `<DEP>_LIBRARY`/`<DEP>_INCLUDE_DIR` cache vars,
+`LUA_PRG=LUA_GEN_PRG=build/host/bin/lua`,
+`NLUA0_HOST_PRG=build/host/lib/nlua0.so`,
+`CMAKE_C_FLAGS` = emulation defines + `-mllvm -wasm-enable-sjlj` +
+`-isystem shims/include` + `-include shims/nvim-wasi-fixups.h`,
+`CMAKE_EXE_LINKER_FLAGS=-Wl,-z,stack-size=8388608` (8 MiB),
+`CMAKE_C_STANDARD_LIBRARIES` = `-lwasi-emulated-* -lsetjmp` +
+`libluacompat53.a` + `libnvim-wasi-shim.a`. Build target is `nvim_bin`
+only (never `nvim`/`all` — runtime/doc targets want to RUN the binary).
+
+**Discoveries / surprises:**
+
+- **Cross-codegen is a supported upstream path.** With
+  `CMAKE_CROSSCOMPILING` + `NLUA0_HOST_PRG`, src/nvim/CMakeLists.txt runs
+  all generators as `host-lua preload_nlua.lua <src> <nlua0.so> <bin>`.
+  We assemble nlua0.so ourselves from nvim's own sources
+  (nlua0.c + mpack/*.c + bit.c) + pinned lpeg, as a macOS bundle with
+  `-undefined dynamic_lookup` (host lua exports the Lua API); an EMPTY
+  `auto/config.h` satisfies lmpack.c's include. `require 'bit'` also
+  resolves from the same .so because the literal cpath entry has no `?` —
+  Lua's C loader then probes it for `luaopen_bit`.
+- **`COMPILE_LUA=OFF` is mandatory, not a nicety:** PUC Lua bytecode
+  embeds sizeof(size_t); the 64-bit host lua's `string.dump` output would
+  not load in the 32-bit wasm Lua. Runtime modules stay embedded as source.
+- **iconv came for free:** v0.12 requires iconv unconditionally (no
+  HAVE_ICONV gate), but wasi-libc ships musl's real built-in iconv
+  (UTF-8/UTF-16/latin1 &co) in libc.a — `ICONV_INCLUDE_DIR` points at the
+  wasi sysroot and no stub was needed.
+- **wasm-ld's default `--gc-sections` had been masking dead undefined
+  refs:** rung 3's link-all gate passed while `tcp.o` referenced
+  `getifaddrs` because nothing live reached it; nvim's channel.c makes
+  uv_tcp_connect live and surfaced it. Same for Lua's `os.execute` →
+  `system`. Lesson recorded: a link-all TU only proves symbols it makes
+  REACHABLE.
+- **Link-order gotcha:** libs in `CMAKE_EXE_LINKER_FLAGS(_INIT)` land
+  BEFORE the object files on the link line, so wasm-ld (strict
+  left-to-right archive scan) contributes nothing from them — the
+  emulated/setjmp/shim archives had to go in `CMAKE_C_STANDARD_LIBRARIES`
+  (appended at the END). The toolchain file's `_INIT` copies are inert for
+  executables but kept for compatibility.
+- **TUI compiles wholesale.** v0.12 has no TUI_ENABLE switch; tui/, vterm/
+  and tui/termkey/ all compiled cleanly against the shim termios/ioctl
+  headers and are linked in (inert until something starts the TUI, which
+  would die on uv_thread_create ENOSYS — the wasm build must stay
+  `--embed`-headless, as planned).
+- cmake.config hardcodes `HAVE_FORKPTY=1` on non-SunOS — irrelevant since
+  our forkpty stub exists either way. `HAVE_DIRFD_AND_FLOCK` and
+  `HAVE_PWD_FUNCS` came out 0 (flock/getpwent unresolvable at
+  check-link time), which conveniently compiles out two more POSIX paths.
+- ccache was picked up automatically by nvim's own Deps.cmake logic and
+  transparently cached the wasi clang invocations.
+- libuv.a was rebuilt twice during this rung (new stubs); `test/uv-smoke.sh`
+  re-ran green after each rebuild.
+
+**Open risks / carry-forwards for rung 5:**
+
+- **channel.c embedded-mode stdio redirect is the #1 rung-5 risk:** on
+  `--embed`, nvim dups stdin/stdout away via `fcntl(F_DUPFD_CLOEXEC)`
+  (wasi-libc fcntl → EINVAL, returns -1) and `dup2(STDERR→stdin/stdout)`
+  (our stub → ENOSYS). The RPC channel would then be initialized with
+  fd -1. Likely fix: implement real F_DUPFD/dup2 semantics in a shim
+  (uvwasi honors `fd_renumber`; renumbering to a FRESH fd needs care) or a
+  tiny `__wasi__` guard in channel.c skipping the redirect (first actual
+  nvim patch, if so).
+- `uv_exepath` ENOSYS → `v:progpath` empty; runtime files (`$VIMRUNTIME`)
+  must come via preopens + env under the wasm host.
+- **Tree-sitter parser archives are built but NOT linked.** Upstream loads
+  parsers via dlopen at runtime (no static-parser mechanism exists in
+  nvim's CMake). nvim boots without them; wiring
+  `libtree-sitter-{c,lua,vim,vimdoc,query,markdown}.a` in (symbol
+  registration + `--whole-archive`-style linking or a small patch) is a
+  rung-6+ task if `vim.treesitter` is needed in the prototype.
+- Binary is pre-asyncify: 5,983,467 bytes at `-O3`; expect growth from
+  asyncify (rung 5+ decision) and shrink from wasm-opt.
+- The `-mllvm -wasm-enable-sjlj` flag is compile-time codegen only; the
+  LINK line warns "argument unused" (harmless). `-lsetjmp` supplies
+  `__wasm_setjmp`/`__wasm_longjmp`; Node 24's V8 compiles and instantiates
+  the EH instructions fine (proven by the gate + the --version run).
+  Whether the sjlj paths *behave* under load is first exercised when real
+  Lua/pcall traffic runs — rung 5+.
