@@ -780,3 +780,171 @@ writes to C stdout.
 
 **Still open (unchanged):** tree-sitter parser archives built but not
 linked; browser/overlay smokes not yet run.
+
+### 2026-07-15 — Parity Task 3: statically linked tree-sitter parsers
+
+**Step-1 investigation (v0.12.4 parser-loading path, documented before
+coding):**
+
+- **Lua side (`runtime/lua/vim/treesitter/language.lua`):**
+  `vim.treesitter.language.add(lang)` first calls
+  `vim._ts_has_language(lang)` and returns `true` immediately if the
+  language is already registered — BEFORE any runtime-path lookup. Only on
+  a miss does it call `api.nvim_get_runtime_file('parser/<lang>.*')` (and
+  returns `nil, 'No parser for language …'` if no file exists) and then
+  `vim._ts_add_language_from_object(path, lang, symbol)`. Note `add`
+  reports "no parser" as a `nil` RETURN, not an error — a bare
+  `pcall(add, lang)` returns `true, nil` on a missing parser, so parity
+  checks must assert the returned value, not just pcall success.
+- **C side (`src/nvim/lua/treesitter.c`):** all registered languages live
+  in a file-static process-global map `static PMap(cstr_t) langs`;
+  `vim._ts_has_language` is `map_has` on it. `add_language()` (behind
+  `_ts_add_language_from_object`) resolves parsers exclusively via
+  `uv_dlopen(path)` + `uv_dlsym("tree_sitter_<symbol>")`
+  (`load_language_from_object`), ABI-checks the result
+  (`TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION` ..
+  `TREE_SITTER_LANGUAGE_VERSION`), then `pmap_put`s it. Under WASI
+  `uv_dlopen` can never succeed (no dynamic loading exists).
+- **No static-registration hook exists in v0.12.4** (verified, per the
+  brief's instruction to check before shimming): the only other load path
+  is `HAVE_WASMTIME`'s `_ts_add_language_from_wasm`, which READS A .wasm
+  FILE from disk into wasmtime (`ts_wasm_store_load_language`) — it is
+  file/path-based too, is OFF in our build (`ENABLE_WASMTIME` defaults
+  off; wasmtime was never fetched), and registers a *wasm-store* language,
+  not a native `TSLanguage*`. There is no API anywhere that accepts an
+  in-process `TSLanguage*` (no lightuserdata entry point), so the "pure
+  shim, no patch" shape is impossible: the `langs` map is file-static and
+  only reachable through dlopen-shaped code.
+- **Mechanism chosen (smallest honest patch):** pre-register all 7
+  statically linked grammars into the `langs` map at `tslua_init()` time
+  under `#ifdef __wasi__`, from a table exported by a new shim TU
+  (`shims/nvim-wasi-treesitter.c`) that references all 7
+  `tree_sitter_*()` constructors (which also forces wasm-ld to extract
+  the parser archive members at link time — no whole-archive tricks
+  needed). With the map pre-populated, `language.add('<lang>')` hits the
+  `_ts_has_language` fast path and returns `true` without ever consulting
+  the runtime path or dlopen — zero runtime-Lua modification, exactly the
+  upstream fast path. The patch mirrors `add_language()`'s ABI-range
+  check (skip + loud stderr line on mismatch, which parity would then
+  catch as a missing grammar). Registration cost is 7 map inserts at Lua
+  state init; parser constructors just return pointers to static tables —
+  no timers, no fds, idle gate unaffected.
+- Baseline sizes before the change: `build/nvim/bin/nvim` = 5,983,839 B;
+  `dist/nvim-asyncify.wasm` = 8,041,186 B.
+
+**Failing-first surprise — a SECOND, unplanned blocker found by the new
+check:** the failing-first run did not fail with the predicted `no-c`; it
+failed with `module 'vim.treesitter' not found`. Probe-driven diagnosis
+(temporary harness fork, since deleted):
+
+- `require('vim.treesitter')` fails even though the tarball ships
+  `runtime/lua/vim/treesitter.lua`, `&rtp` contains `/runtime`,
+  `nvim_get_runtime_file('lua/vim/treesitter.lua')` FINDS the file,
+  `loadfile('/runtime/lua/vim/treesitter.lua')` works, and
+  `vim._load_package` IS installed at `package.loaders[2]`.
+- The break is one level down: `vim._load_package` uses
+  `vim.api.nvim__get_runtime(paths, false, {is_lua=true})`
+  (`runtime/lua/vim/_init_packages.lua`), and `runtime_get_named_common()`
+  (`src/nvim/runtime.c`) accepts a hit only if `os_file_is_readable()` —
+  libuv `uv_fs_access(..., R_OK)` — succeeds. `vim.fn.filereadable()` of
+  the same path returned 0: **`access(R_OK)` always fails under
+  `@bjorn3/browser_wasi_shim`.** (`nvim_get_runtime_file` takes the
+  glob/scandir path instead, which never calls `access` — that's why it
+  disagreed.)
+- Root cause, empirically confirmed with a 20-line wasm C probe run under
+  the same shim arrangement: the shim's `OpenDirectory.fd_fdstat_get()`
+  reports `fs_rights_base = fs_rights_inheriting = 0`, and wasi-libc's
+  `faccessat()` implements `access(amode != F_OK)` as a check of the
+  requested rights against the directory fd's `fs_rights_inheriting` →
+  0 rights means every `R_OK`/`W_OK`/`X_OK` probe fails `EACCES`
+  ("Permission denied"), while `stat()` and `F_OK` succeed. The parent
+  host (`src/engine/nvim-host.ts`) uses the same stock `PreopenDirectory`,
+  so this affects the real engine-swap environment, not just the parity
+  harness; Node's uvwasi (rungs 1–4) reports full rights, which is why no
+  earlier rung ever tripped it. The smoke path never requires runtime Lua
+  modules, which is why rung 8 passed.
+- Consequence: EVERY runtime-Lua `require` (vim.treesitter, vim.fs users,
+  anything not embedded in the binary) was broken under the browser-shim
+  host — a parity gap much wider than tree-sitter; the new check just
+  happened to be the first to require a runtime module.
+- Fix (shim-side, not harness-side, so the binary is robust under any
+  rights-agnostic host and the parity harness keeps mirroring the parent
+  host faithfully): a stat-based `access()` replacement — existence via
+  `stat()` grants `F_OK`/`R_OK`/`W_OK` (preview1 filestat carries no
+  permission bits; actual open can still fail honestly), `X_OK` granted
+  for directories only (nothing is executable under WASI — keeps
+  `os_can_exe()` honest).
+  - **First attempt FAILED, recorded per append-mostly convention:**
+    defining a strong `access` symbol in `wasi-libc-missing.c` to shadow
+    wasi-libc's, on the theory that libc's member would never be
+    extracted. The rung-3 link-all gate (`test/uv-linkall.c`) immediately
+    caught it: wasi-libc defines `access` in its MONOLITHIC
+    `posix.c.obj`, which the link extracts anyway for other symbols →
+    guaranteed duplicate-symbol error. (That gate earning its keep,
+    second time.)
+  - Landed shape: the function is named `uv__wasi_access_shim`
+    (`shims/wasi-libc-missing.c`), and `shims/uv-wasi-fixups.h`
+    (force-included into every libuv TU) `#define`s `access` to it —
+    compile-time routing of libuv's `uv_fs_access`, the only `access()`
+    caller in the whole link (verified: no direct calls in Neovim or PUC
+    Lua sources). No symbol conflict is possible.
+
+**Failing-first evidence:** new `treesitter` parity check appended to
+`test/parity-check.mjs` (placed BEFORE `io_write_safe`, which must stay
+last): asserts all 7 grammars register (`pcall(language.add, lang)` AND
+truthy return AND `vim._ts_has_language(lang)` — the return-value check
+matters, see above) and that
+`get_string_parser('int x;','c'):parse()[1]:root():type()` is
+`translation_unit` (a real parse, not just registration). Against the
+pre-fix dist: `FAIL treesitter: ... module 'vim.treesitter' not found` →
+`PARITY FAIL` exit 1 (the access() gap masked the predicted `no-c`
+failure mode — the check never got as far as language.add).
+
+**Implementation (rest of the mechanism, as chosen in Step 1):**
+
+- `shims/nvim-wasi-treesitter.c` (new): `{name, constructor}` table of all
+  7 grammars, referencing the 7 `tree_sitter_*()` symbols — this is what
+  forces wasm-ld to extract the parser archive members (no whole-archive
+  needed; treesitter.c references the table, the table references the
+  parsers). Compiled into `libnvim-wasi-shim.a` (safe as an archive
+  member — unlike the asyncify object, it IS referenced).
+- `patches/neovim-ts-static.patch` (nvim patch #3): `__wasi__`-guarded
+  hunk in `tslua_init()` walking the table into the `langs` map, with
+  `add_language()`'s ABI-range validation (skip + loud stderr on
+  mismatch) and a `map_has` guard for idempotent re-init.
+- `scripts/build-nvim.sh`: applies the patch (same grep-guarded
+  `apply_one_patch` flow), compiles the new shim TU into the shim
+  archive, and appends the 6 parser archives to
+  `CMAKE_C_STANDARD_LIBRARIES` AFTER `libnvim-wasi-shim.a` (wasm-ld
+  scans archives left-to-right; the registry member's references are
+  what pull the parsers in).
+
+**Gate results (all green):**
+
+- `node test/parity-check.mjs dist/...` → 4/4 checks:
+  `PASS treesitter: all 7 grammars registered; get_string_parser('int
+  x;','c') parsed (root: translation_unit)` → **PARITY PASS**; the three
+  prior checks stayed green.
+- `bash scripts/smoke.sh` → **SMOKE PASS**; idle gate holds (2 wake-ups
+  over 10 s, final 5 s sample 0.00/s ≤ 5/s) — parser registration adds
+  no timers/fds, as designed.
+- `bash test/uv-smoke.sh` → link-all + case A/B green (this gate is also
+  what caught the failed access()-override attempt above).
+
+**Size delta (parsers + access shim):**
+
+| artifact | before | after | delta |
+| --- | --- | --- | --- |
+| `build/nvim/bin/nvim` (pre-asyncify) | 5,983,839 B | 9,168,111 B | +3,184,272 B (+53%) |
+| `dist/nvim-asyncify.wasm` | 8,041,186 B | 10,825,005 B | +2,783,819 B (+35%) |
+
+Above the brief's ~1–2 MB estimate: the 6 archives total ~3.3 MB of wasm
+objects (vim 1.5 MB, markdown 877 KB, c 662 KB, vimdoc 276 KB, lua 67 KB,
+query 23 KB) and parser tables are pure data — nothing for `-O2`/asyncify
+to shrink. The asyncified binary is now ~29% LARGER than the vendored
+engine's 8,386,869 B (it was 4.1% smaller before this task) — the honest
+cost of embedding 7 grammars. **This closes the "tree-sitter parser
+archives built but not linked" open item.**
+
+**Still open:** browser/overlay smokes against our binary not yet run
+(rung-9 stretch).

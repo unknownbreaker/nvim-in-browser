@@ -519,6 +519,62 @@ const CHECKS = [
     },
   },
   {
+    // vim.treesitter must work without dlopen: the 7 grammars from the 6
+    // statically linked parser archives (c, lua, vim, vimdoc, query,
+    // markdown, markdown_inline — the markdown archive exports two) must all
+    // register via vim.treesitter.language.add, and an actual parse must
+    // produce a real tree. NOTE: language.add reports a missing parser as a
+    // `nil` RETURN VALUE (not an error), so we must check the returned value
+    // — a bare pcall(add, lang) is `true, nil` on a missing parser.
+    name: "treesitter",
+    async fn(rpc, ctx) {
+      const GRAMMARS = ["c", "lua", "vim", "vimdoc", "query", "markdown", "markdown_inline"];
+      const missing = await ctx.timeout(
+        rpc.request("nvim_exec_lua", [
+          `local missing = {}
+           for _, lang in ipairs(...) do
+             local ok, res = pcall(vim.treesitter.language.add, lang)
+             if not (ok and res and vim._ts_has_language(lang)) then
+               missing[#missing + 1] = lang
+             end
+           end
+           return missing`,
+          [GRAMMARS],
+        ]),
+        4000,
+        "nvim_exec_lua(language.add x7)",
+      );
+      if (Array.isArray(missing) && missing.length > 0) {
+        return {
+          ok: false,
+          detail: `grammars not registered: ${missing.map(asString).join(", ")} (${GRAMMARS.length - missing.length}/${GRAMMARS.length} ok)`,
+        };
+      }
+      const parsed = await ctx.timeout(
+        rpc.request("nvim_exec_lua", [
+          `local ok, res = pcall(vim.treesitter.language.add, 'c')
+           if not (ok and res) then return 'no-c' end
+           local p = vim.treesitter.get_string_parser('int x;', 'c')
+           local trees = p:parse()
+           local root = trees[1]:root()
+           if root:type() ~= 'translation_unit' then return 'bad-root:' .. root:type() end
+           return 'parsed'`,
+          [],
+        ]),
+        4000,
+        "nvim_exec_lua(get_string_parser)",
+      );
+      const parsedStr = asString(parsed);
+      if (parsedStr !== "parsed") {
+        return { ok: false, detail: `parse check returned ${JSON.stringify(parsedStr)}, expected "parsed"` };
+      }
+      return {
+        ok: true,
+        detail: `all ${GRAMMARS.length} grammars registered; get_string_parser('int x;','c') parsed (root: translation_unit)`,
+      };
+    },
+  },
+  {
     // User Lua io.write() must not corrupt the msgpack-RPC stream. The 3-byte
     // payload 0xdc 0x00 0x10 is the exact sequence empirically proven fatal
     // (a bare msgpack array16 header: an unfixed nvim writes it to fd 1,

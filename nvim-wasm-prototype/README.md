@@ -58,13 +58,14 @@ nvim-wasm-prototype/
     smoke.sh           # rung-8 gate: parent smoke harness vs dist/ artifacts
     wasi-toolchain.cmake
   shims/               # clean-room libuv/nvim WASI shim layer (see STATUS.md)
-  patches/             # provenance-headered patches (lua, libuv, nvim embed-stdio)
+  patches/             # provenance-headered patches (lua, libuv, 3x nvim)
   test/
     hello.c            # rung-1 smoke test: wasm32-wasi hello world
     run-wasi.mjs       # Node runner for .wasm binaries via node:wasi
     uv-smoke.{c,sh} uv-linkall.c   # rung-3 libuv gate
     check-module.mjs   # rung-4 gate: module compiles, _start+memory exported
     check-asyncify.mjs # rung-5 gate: asyncify ABI + scratch-helper exports
+    parity-check.mjs   # parity gate: progpath, print/io.write safety, treesitter
   .toolchain/ build/ src-cache/ dist/   # all gitignored, produced by scripts
 ```
 
@@ -96,7 +97,7 @@ idle-CPU gate.
 
 | Metric | Clean-room build | Vendored (nvim-wasm) |
 |---|---|---|
-| Asyncified binary | 8,040,769 B | 8,386,869 B |
+| Asyncified binary | 10,825,005 B (incl. 7 statically linked tree-sitter grammars; 8,041,186 B before them) | 8,386,869 B |
 | Runtime tarball | 5,742,514 B | 5,613,852 B |
 | Idle poll wakeups (final 5s sample) | 0.00/s | 1/s (needs host backoff) |
 
@@ -122,15 +123,24 @@ never engages — idle is genuinely event-driven.
   diverts Lua's default io output + `io.stdout` to stderr under `__wasi__`,
   so user Lua `io.write()`/`io.stdout:write()` cannot corrupt the RPC
   stream on fd 1
+- `patches/neovim-ts-static.patch` — `tslua_init()` pre-registers the 7
+  statically linked tree-sitter grammars (table in
+  `shims/nvim-wasi-treesitter.c`) under `__wasi__`, so
+  `vim.treesitter.language.add()` succeeds via the `_ts_has_language`
+  fast path — WASI has no dlopen for `parser/<lang>.so`
 
 **What an engine swap would take:** the parent host runs this binary
 unchanged (same argv/env/preopens/Asyncify ABI, incl. the
-`nvim_asyncify_get_*` scratch exports). Two former blockers are closed and
-gated by `test/parity-check.mjs`: `uv_exepath` now returns a synthetic
-absolute path (`v:progpath` populated — `progpath` check), and user Lua
+`nvim_asyncify_get_*` scratch exports). The known parity gaps are closed
+and gated by `test/parity-check.mjs`: `uv_exepath` returns a synthetic
+absolute path (`v:progpath` populated — `progpath` check); user Lua
 `io.write()`/`io.stdout` no longer reaches the RPC fd (upstream's stdio
 redirect is unimplementable under preview1, so `nlua_init()` diverts Lua's
-io output to stderr — `io_write_safe`/`print_safe` checks). Remaining
-parity gap before replacing the vendored engine: tree-sitter parser
-archives are built but not linked (`vim.treesitter` highlight unavailable).
-Full open-items list in `STATUS.md`.
+io output to stderr — `io_write_safe`/`print_safe` checks); and
+`vim.treesitter` works without dlopen — all 7 pinned grammars (c, lua,
+vim, vimdoc, query, markdown, markdown_inline) are statically linked and
+pre-registered, and runtime-Lua `require` itself was un-broken along the
+way (wasi-libc's rights-based `access()` fails under zero-rights hosts
+like the browser shim; libuv's `uv_fs_access` is now routed to a
+stat-based shim — `treesitter` check). Remaining: browser/overlay smokes
+against our binary. Full open-items list in `STATUS.md`.
