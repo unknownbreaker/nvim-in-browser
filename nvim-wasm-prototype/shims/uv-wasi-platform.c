@@ -89,11 +89,13 @@ int uv_interface_addresses(uv_interface_address_t** addresses, int* count) {
   return UV_ENOSYS;
 }
 
-void uv_free_interface_addresses(uv_interface_address_t* addresses,
-                                 int count) {
-  (void) addresses;
-  (void) count;
-}
+/* uv_free_interface_addresses is NOT defined here: it lives in upstream
+ * src/uv-common.c (compiled into libuv.a unmodified) and is a plain no-op
+ * free-of-nothing there too, since uv_interface_addresses() above always
+ * reports UV_ENOSYS and never allocates. Defining it a second time here
+ * used to produce a duplicate strong symbol that only failed at final-link
+ * time for any consumer pulling in both this object and uv-common.o (see
+ * test/uv-linkall.c, which guards against this class of regression). */
 
 /* uv__get_rlimit_max_memory stays in upstream core.c; our getrlimit stub
  * makes it report "no limit configured" (0). */

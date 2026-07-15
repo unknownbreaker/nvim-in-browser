@@ -13,6 +13,13 @@
 #     buffered before the loop starts; case B: data arrives 300ms in,
 #     which proves the poll_oneoff fd_read subscription wakes a *blocked*
 #     loop.
+#
+# First step: the "link-all check" (test/uv-linkall.c) — compiles and LINKS
+# (never runs) a TU that references one exported symbol from every
+# shims/uv-wasi-*.c object plus a handful of upstream-heavy libuv symbols,
+# so a duplicate strong symbol between the shim layer and upstream (e.g.
+# Finding 1's uv_free_interface_addresses) fails the build right here
+# instead of surfacing later in a real consumer.
 
 set -Eeuo pipefail
 
@@ -31,6 +38,20 @@ OUT="${PROTO_ROOT}/build/uv-smoke.wasm"
   echo "uv-smoke: ${LIB}/libuv.a missing; run scripts/build-deps.sh libuv first" >&2
   exit 1
 }
+
+LINKALL_OUT="${PROTO_ROOT}/build/uv-linkall.wasm"
+
+echo "uv-smoke: link-all check (compiling + linking ${LINKALL_OUT})"
+"${WASI_SDK}/bin/clang" --target=wasm32-wasi -O2 \
+  -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS \
+  -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_GETPID \
+  -I"${INC}" \
+  -o "${LINKALL_OUT}" \
+  "${SCRIPT_DIR}/uv-linkall.c" \
+  "${LIB}/libuv.a" \
+  -lwasi-emulated-signal -lwasi-emulated-process-clocks \
+  -lwasi-emulated-mman -lwasi-emulated-getpid
+echo "uv-smoke: link-all check OK (no duplicate/undefined symbols)"
 
 echo "uv-smoke: compiling ${OUT}"
 "${WASI_SDK}/bin/clang" --target=wasm32-wasi -O2 \

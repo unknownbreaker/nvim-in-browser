@@ -51,6 +51,8 @@
 #include <poll.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 int uv__platform_loop_init(uv_loop_t* loop) {
@@ -146,19 +148,46 @@ static void uv__pollfds_del(uv_loop_t* loop, int fd) {
  * wasi-libc poll(NULL, 0, ms). Never spins. A negative timeout means
  * "block forever"; since nothing outside the loop can wake a
  * single-threaded WASI program, that is served as repeated long sleeps
- * (an honest reflection of "this program is now permanently idle"). */
+ * (an honest reflection of "this program is now permanently idle").
+ *
+ * poll()'s return is checked: a host whose poll_oneoff rejects a clock-only
+ * subscription (or otherwise errors) must not be allowed to fail silently
+ * -- ignoring rc here would either busy-spin this function's infinite loop
+ * (rc<0 every iteration, no actual sleeping) or return "done" immediately on
+ * the finite branch when no time has actually elapsed, both of which
+ * violate this port's no-busy-wait invariant. EINTR is the one expected,
+ * recoverable errno (a spurious wake with nothing to report) -- just
+ * recompute and continue the wait. Anything else is a genuinely unexpected
+ * host/libc condition, so it aborts loudly, consistent with this file's
+ * other abort-on-unexpected-errno handling in uv__io_poll below. */
 static void uv__wasi_sleep(int timeout) {
   static const int chunk_ms = 3600 * 1000;
+  int rc;
 
   if (timeout == 0)
     return;
 
   if (timeout < 0) {
-    for (;;)
-      (void) poll(NULL, 0, chunk_ms);
+    for (;;) {
+      rc = poll(NULL, 0, chunk_ms);
+      if (rc < 0 && errno != EINTR) {
+        fprintf(stderr,
+                "libuv-wasi: uv__wasi_sleep: poll() failed unexpectedly "
+                "(errno=%d)\n",
+                errno);
+        abort();
+      }
+    }
   }
 
-  (void) poll(NULL, 0, timeout);
+  rc = poll(NULL, 0, timeout);
+  if (rc < 0 && errno != EINTR) {
+    fprintf(stderr,
+            "libuv-wasi: uv__wasi_sleep: poll() failed unexpectedly "
+            "(errno=%d)\n",
+            errno);
+    abort();
+  }
 }
 
 void uv__io_poll(uv_loop_t* loop, int timeout) {

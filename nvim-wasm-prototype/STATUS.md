@@ -294,3 +294,60 @@ still fire asynchronously on the next loop turn (upstream contract kept);
   POLLHUP — coincidentally correct semantics (both mean hangup).
 - `test/uv-smoke.sh` is the reusable gate harness; `test/run-wasi.mjs`
   untouched (stdin piping happens in the shell harness, not the runner).
+
+### 2026-07-15 — Task 5 review hardening (rung 3 findings fixed)
+
+A review of the rung-3 libuv port surfaced four findings, all now fixed:
+
+- **Duplicate strong symbol (Important):** `shims/uv-wasi-platform.c` also
+  defined `uv_free_interface_addresses`, which upstream `src/uv-common.c`
+  already defines (compiled unmodified into `libuv.a`). `ar` doesn't dedupe
+  symbols across archive members, so this only failed at final-link time,
+  and only for a consumer whose symbol needs pulled in *both* objects —
+  `test/uv-smoke.c` never did, so rung 3's own gate missed it. Fixed by
+  deleting the shim's definition (upstream's no-op is correct: our
+  `uv_interface_addresses` always returns `UV_ENOSYS` and never allocates).
+  **New gate added to close this whole class of bug:** `test/uv-linkall.c`
+  — a TU that takes the address of one exported symbol from every
+  `shims/uv-wasi-*.c` object plus a dozen upstream-heavy symbols
+  (`uv_strerror`, `uv_loop_init`, `uv_tcp_init`, `uv_udp_init`,
+  `uv_getaddrinfo`, `uv_fs_open`, `uv_random`, `uv_hrtime`, …), compiled and
+  *linked* (never run) as the first step of `test/uv-smoke.sh` ("link-all
+  check"). Verified it reproduces the exact `wasm-ld: error: duplicate
+  symbol: uv_free_interface_addresses` failure against the pre-fix shim,
+  and passes clean after.
+- **Busy-wait/silent-failure risk (Important):** `uv__wasi_sleep()` in
+  `shims/uv-wasi-poll.c` ignored `poll()`'s return value entirely. On a
+  host whose `poll_oneoff` ever rejected a clock-only subscription, the
+  infinite-timeout branch would busy-spin (tight retry loop, no actual
+  sleep) and the finite branch would return "elapsed" immediately with no
+  time having passed — both violate this port's core no-busy-wait
+  invariant (see rung-3's own poll-core notes above). Fixed: check `rc`,
+  loop past `EINTR` (recompute and continue — genuinely nothing to report),
+  abort loudly (`fprintf` naming `uv__wasi_sleep` + `errno`, then `abort()`)
+  on anything else, consistent with `uv__io_poll`'s own
+  abort-on-unexpected-errno handling a few lines down.
+- **Patch provenance header (Minor):** `patches/libuv-wasi.patch` lacked
+  the WHAT/WHY/CLEAN-ROOM-PROVENANCE header comment block that
+  `patches/lua51-wasi.patch` established as this project's patch-file
+  convention. Added; verified both `patch -p1` and `git apply --check`
+  still accept the file with the header prepended (leading `#`-comment
+  lines before the first `---`/`diff` hunk are tolerated by both tools),
+  and a from-scratch `build-deps.sh` rebuild (which applies it via
+  `patch -p1 -d`) still succeeds.
+- **Silent re-entrant `uv_once` (Minor):** `shims/uv-wasi-threads.c`'s
+  `uv_once()` only checked `*guard == 0`, so a re-entrant call made while
+  the guarded callback is still running (`*guard == 1`) fell through and
+  returned as if already-initialized — a silent partial-init hazard on a
+  single-threaded target where this can only ever be a genuine
+  self-deadlock, never a real "someone else already finished it" race.
+  Fixed: `*guard == 1` now calls the file's existing loud-deadlock helper
+  (`uv__wasi_deadlock`), matching the abort-on-deadlock style already used
+  by `uv_sem_wait`/`uv_cond_wait` in the same file.
+
+**Verification:** deleted `build/deps/lib/libuv.a`, confirmed
+`bash test/uv-smoke.sh`'s new link-all step FAILED with the exact
+duplicate-symbol error above against the unfixed shim; re-ran
+`bash scripts/build-deps.sh` (full, from scratch) and `bash test/uv-smoke.sh`
+after all four fixes — link-all check, case A-immediate, and case B-delayed
+all green, exit 0.

@@ -136,12 +136,28 @@ size_t uv__thread_stack_size(void) {
 /* --- once --------------------------------------------------------------- */
 
 void uv_once(uv_once_t* guard, void (*callback)(void)) {
-  /* pthread_once_t is plain int in wasi-libc; PTHREAD_ONCE_INIT == 0. */
-  if (*guard == 0) {
-    *guard = 1;
-    callback();
-    *guard = 2;
+  /* pthread_once_t is plain int in wasi-libc; PTHREAD_ONCE_INIT == 0.
+   * 0 = pristine, 1 = callback currently running, 2 = complete. */
+  if (*guard == 2)
+    return;
+
+  if (*guard == 1) {
+    /* Re-entrant call: the guarded callback is itself (directly or
+     * transitively) calling uv_once() on the same guard while it is still
+     * running. There is only one thread, so this can never be "someone
+     * else already finished it" -- it can only be a genuine self-deadlock
+     * (the original call is still on the stack, waiting for this one to
+     * return before it can set guard = 2). Silently treating this as
+     * "already done" would let the caller proceed against a partially
+     * initialized result, which is worse than the honest deadlock upstream
+     * would have produced. */
+    uv__wasi_deadlock("uv_once() reentered on a guard still initializing");
+    return;
   }
+
+  *guard = 1;
+  callback();
+  *guard = 2;
 }
 
 /* --- mutexes (no contention possible: always succeed) -------------------- */
