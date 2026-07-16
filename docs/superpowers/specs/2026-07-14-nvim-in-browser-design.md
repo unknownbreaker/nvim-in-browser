@@ -323,6 +323,23 @@ Layered, TDD throughout:
    network from Lua).
 5. **Hardening:** resource lifecycle, watchdog, safe mode, fidelity suite
    expansion, performance gates.
+   ✅ **Done 2026-07-16** — the robustness layer landed across both repos:
+   - **Fidelity suite** (engine repo `nvim-wasi`): a differential harness drives
+     the WASM engine and desktop `nvim --headless` (the oracle) through the same
+     key sequences and asserts identical buffers — **48/48 cases pass** across
+     motions, operators×motions, text objects, registers, macros, `:s`, `:g`,
+     undo/redo, visual, and counts. Lives in nvim-wasi, not this repo.
+   - **Performance gates** (`scripts/browser-smoke.mjs`): cold-boot budget
+     **< 6000 ms** (wasm-compile-inclusive) and input-latency **p95 < 75 ms**
+     (RPC round-trip proxy), enforced on every browser-smoke run.
+   - **Resource lifecycle** (`src/engine-frame/engine-frame.ts`): idle-instance
+     teardown — after inactivity the scratch page saves its draft, disposes the
+     worker, and shows a "💤 sleeping" overlay; the next key/click respawns a
+     fresh engine and restores the draft — plus a **~700 MB memory watchdog**
+     (a runaway config/plugin is stopped with a notice, deliberately no
+     auto-respawn). Safe mode (Milestone 4) completes the watchdog set.
+     Browser-verified end-to-end (`browser-smoke.mjs` PHASE E: idle window
+     shrunk via `window.__nvimIdleMs`, teardown → respawn → restore proven).
 
 ## Milestone 1 implementation notes (2026-07-14)
 
