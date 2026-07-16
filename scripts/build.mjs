@@ -26,6 +26,7 @@ await build({
     { in: path.join(root, "src", "background.ts"), out: "background" },
     { in: path.join(root, "src", "engine-frame", "engine-frame.ts"), out: "engine-frame" },
     { in: path.join(root, "src", "engine", "worker.ts"), out: "engine-worker" },
+    { in: path.join(root, "src", "options", "options.ts"), out: "options" },
   ],
   outdir: outDir,
   bundle: true,
@@ -49,6 +50,7 @@ await build({
 });
 
 await cp(path.join(root, "src", "scratch", "scratch.html"), path.join(outDir, "scratch.html"));
+await cp(path.join(root, "src", "options", "options.html"), path.join(outDir, "options.html"));
 await cp(
   path.join(root, "src", "engine-frame", "engine-frame.html"),
   path.join(outDir, "engine-frame.html"),

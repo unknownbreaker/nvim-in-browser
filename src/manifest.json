@@ -13,6 +13,7 @@
   "background": {
     "service_worker": "background.js"
   },
+  "options_page": "options.html",
   "action": {
     "default_title": "Open Neovim scratch page",
     "default_icon": {
