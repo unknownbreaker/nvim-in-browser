@@ -46,7 +46,7 @@ const extDir = path.join(root, "dist", "chromium");
 const shotPath = path.join(root, ".superpowers", "sdd", "task-6-boot.png");
 const SYSTEM_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
-const BOOT_TIMEOUT_MS = 60_000; // first boot compiles ~8MB wasm
+const BOOT_TIMEOUT_MS = 60_000; // first boot compiles ~11MB wasm
 // Safe-mode reboot: the broken config boot hangs its full 12s watchdog before
 // the clean retry compiles wasm, so give this path extra headroom.
 const SAFE_MODE_TIMEOUT_MS = 90_000;

@@ -1,6 +1,6 @@
 // Engine frame: a full-page canvas that boots the nvim engine worker, renders
 // its grid, and forwards keyboard input. Runs as its own extension page so the
-// engine worker and its 8 MB wasm are isolated from host pages.
+// engine worker and its ~11 MB wasm are isolated from host pages.
 //
 // Modes (via ?mode= query param):
 //   full  — used by the scratch page; boots immediately, focuses the canvas.
@@ -581,6 +581,10 @@ function installIdleLifecycle(store: ScratchStore): void {
     // stopped the editor to avoid a crash loop, so never respawn one.
     if (!debug.sleeping || debug.memoryCapped || resuming) return;
     resuming = true;
+    // The prior instance is gone; the engine is not live until the respawn boot
+    // below succeeds (which sets debug.ready true again). Clear it now so a failed
+    // resume can't leave a stale ready=true alongside sleeping=true.
+    debug.ready = false;
     // Fresh client + identical wiring, then the SAME init the first boot ran.
     client = makeClient();
     wireClient(client);
