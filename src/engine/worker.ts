@@ -10,7 +10,7 @@
 //     - configFiles?: { path: string; data: Uint8Array }[] written into the WASI FS at boot
 //   worker -> page: { type: "ready" } | { type: "stdout", chunk } |
 //                   { type: "exit", code } | { type: "fatal", message } |
-//                   { type: "stat", wakeupsPerSecond }  (every 5s)
+//                   { type: "stat", wakeupsPerSecond, memoryBytes }  (every 5s)
 import { startNvimHost, type NvimHost } from "./nvim-host";
 import { untar } from "./untar";
 
@@ -58,7 +58,12 @@ async function start(msg: StartMsg): Promise<void> {
         onStdout: (chunk) => ctx.postMessage({ type: "stdout", chunk }, [chunk.buffer]),
         onExit: (code) => ctx.postMessage({ type: "exit", code }),
         onFatal: (message) => ctx.postMessage({ type: "fatal", message }),
-        onStat: (wakeupsPerSecond) => ctx.postMessage({ type: "stat", wakeupsPerSecond }),
+        onStat: (stat) =>
+          ctx.postMessage({
+            type: "stat",
+            wakeupsPerSecond: stat.wakeupsPerSecond,
+            memoryBytes: stat.memoryBytes,
+          }),
       },
       { argv: msg.argv, configFiles: msg.configFiles },
     );

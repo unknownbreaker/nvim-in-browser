@@ -17,6 +17,10 @@
 //   PHASE D — a broken/hanging config recovers via safe mode: the engine still
 //             boots (ready), safeMode is true, and the broken config did NOT
 //             apply (tabstop back to default 8). Cleans up the config after.
+//   PHASE E — idle teardown -> respawn -> restore: with the idle window shrunk
+//             to ~2.5s via window.__nvimIdleMs, the frame disposes its worker
+//             (debug.sleeping true, "💤 sleeping" overlay shown); a keydown
+//             respawns a fresh engine and restores the typed draft.
 //
 // Browser resolution (first that exists wins):
 //   1. $NVIM_SMOKE_CHROME               — explicit override
@@ -42,12 +46,34 @@ const extDir = path.join(root, "dist", "chromium");
 const shotPath = path.join(root, ".superpowers", "sdd", "task-6-boot.png");
 const SYSTEM_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
-const BOOT_TIMEOUT_MS = 60_000; // first boot compiles ~8MB wasm
+const BOOT_TIMEOUT_MS = 60_000; // first boot compiles ~11MB wasm
 // Safe-mode reboot: the broken config boot hangs its full 12s watchdog before
 // the clean retry compiles wasm, so give this path extra headroom.
 const SAFE_MODE_TIMEOUT_MS = 90_000;
 const IDLE_MS = 12_000;
 const IDLE_GATE = 5; // last idle stat sample must be <= this many wakeups/sec
+
+// Performance budgets (Phase B). These are DELIBERATELY GENEROUS headless-CI
+// ceilings, NOT the real numbers — a warm local/desktop run is far under them.
+// They exist to catch gross regressions (a boot that suddenly doubles, an RPC
+// path that stalls), not to measure true performance.
+//   BOOT_BUDGET_MS: cold boot, first-load compile of the ~11MB wasm INCLUDED.
+//     Real cold boot is ~1-2s; headless CI slack pushes the ceiling to 6s.
+//   LATENCY_BUDGET_MS: p95 of a minimal RPC round-trip. Real is ~3ms; headless
+//     scheduling jitter justifies the 75ms ceiling.
+const BOOT_BUDGET_MS = 6_000;
+const LATENCY_BUDGET_MS = 75;
+const LATENCY_SAMPLES = 40; // RPC round-trips driven for the latency gate
+
+// Idle-teardown gate (PHASE E). The frame tears its worker down after its idle
+// window (default 5 min) elapses with no input; window.__nvimIdleMs overrides
+// that window (read at idle-timer arm time inside the frame) so the smoke can
+// exercise teardown -> respawn -> restore in seconds, not minutes. 2.5s is small
+// enough to keep the smoke quick, yet comfortably clears the sub-second type +
+// confirm sequence before the timer fires.
+const IDLE_TEARDOWN_TEST_MS = 2_500;
+const IDLE_MARKER = "idle-teardown-marker"; // distinctive draft proving restore
+const SLEEP_POLL_TIMEOUT_MS = 15_000; // generous ceiling to observe sleeping===true
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -279,6 +305,11 @@ async function run(exec, headless, id) {
       console.log(`  [reqfailed] ${r.url()} ${r.failure()?.errorText ?? ""}`),
     );
 
+    // Time the cold boot: from just before the initial scratch load through to
+    // __nvim.ready. This IS the perf boot-time gate's measurement (Phase B) — a
+    // real page load that compiles the ~11MB wasm from scratch, so no separate
+    // load is added just to time one.
+    const bootStart = Date.now();
     await page.goto(`chrome-extension://${id}/scratch.html`, { waitUntil: "domcontentloaded" });
 
     // The engine + __nvim hook live inside the engine-frame iframe.
@@ -293,6 +324,15 @@ async function run(exec, headless, id) {
       polling: 250,
     });
     console.log(`engine ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
+    // ---- PERF GATE 1: boot-time budget (cold, wasm-compile-inclusive) -------
+    const bootMs = Date.now() - bootStart;
+    console.log(`PERF: boot ${bootMs}ms (budget ${BOOT_BUDGET_MS})`);
+    if (bootMs >= BOOT_BUDGET_MS) {
+      await browser.close();
+      return { ok: false, reason: `boot ${bootMs}ms exceeds budget ${BOOT_BUDGET_MS}ms (cold, ~11MB wasm compile included)` };
+    }
+    console.log("PERF: ASSERT OK: cold boot under budget");
 
     // Drive input through the debug hook (rpcnotify path; no real focus needed).
     await frame.evaluate(() => window.__nvim.input("ihello world"));
@@ -328,6 +368,30 @@ async function run(exec, headless, id) {
       await browser.close();
       return { ok: false, reason: `idle wakeups ${lastIdle}/s exceeds gate ${IDLE_GATE}/s` };
     }
+
+    // ---- PERF GATE 2: input-latency budget (RPC round-trip proxy) ----------
+    // Drive LATENCY_SAMPLES minimal RPC round-trips against the now-idle engine
+    // and gate p95. nvim_eval("1") is the cheapest request that still exercises
+    // the full page -> worker -> nvim -> back path, so it stands in for input
+    // responsiveness. Each round-trip is timed host-side (Date.now bracketing
+    // the awaited evaluate) so the number reflects real end-to-end latency.
+    console.log(`\n[PERF] input latency: driving ${LATENCY_SAMPLES} RPC round-trips (nvim_eval)...`);
+    const latencies = [];
+    for (let i = 0; i < LATENCY_SAMPLES; i++) {
+      const t0 = Date.now();
+      await frame.evaluate(() => window.__nvim.request("nvim_eval", ["1"]));
+      latencies.push(Date.now() - t0);
+    }
+    const sorted = [...latencies].sort((a, b) => a - b);
+    const pct = (p) => sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
+    const p50 = pct(50);
+    const p95 = pct(95);
+    console.log(`PERF: latency p50=${p50}ms p95=${p95}ms (budget ${LATENCY_BUDGET_MS})`);
+    if (p95 >= LATENCY_BUDGET_MS) {
+      await browser.close();
+      return { ok: false, reason: `input latency p95 ${p95}ms exceeds budget ${LATENCY_BUDGET_MS}ms (samples: ${JSON.stringify(latencies)})` };
+    }
+    console.log("PERF: ASSERT OK: input latency p95 under budget");
 
     // ---- PHASE A: persistence across reload (IndexedDB round-trip) ----------
     // Type a draft, wait past the 400ms save debounce, then reload the SAME page
@@ -518,16 +582,137 @@ async function run(exec, headless, id) {
     }
     console.log("PHASE D: safe-mode recovered");
 
+    // ---- PHASE E: idle teardown -> respawn -> restore ----------------------
+    // The scratch full-mode frame disposes its worker after IDLE_TEARDOWN_MS of
+    // no input (default 5 min) and shows a "💤 sleeping" overlay; the next
+    // keydown/click respawns a fresh engine and restores the saved draft. We
+    // shrink that idle window to IDLE_TEARDOWN_TEST_MS via window.__nvimIdleMs
+    // (the frame reads it when it ARMS the idle timer at boot) so the smoke can
+    // prove teardown -> respawn -> restore without waiting minutes. A brand-new
+    // page is used so the override is injected via evaluateOnNewDocument BEFORE
+    // the engine-frame's scratch init arms the timer. NOTE the flags live flat
+    // on window.__nvim (it IS the debug object): __nvim.sleeping/.ready, not
+    // __nvim.debug.*.
+    console.log(`\n[PHASE E] idle teardown: opening a fresh scratch page with __nvimIdleMs=${IDLE_TEARDOWN_TEST_MS}...`);
+    const pageE = await browser.newPage();
+    pageE.on("pageerror", (err) => console.log(`  [PHASE E pageerror] ${err.message}`));
+    // Runs in EVERY document/child frame this page creates (incl. the engine-frame
+    // iframe) before any of its own script executes, so the frame sees the small
+    // idle value at arm time.
+    await pageE.evaluateOnNewDocument((ms) => {
+      window.__nvimIdleMs = ms;
+    }, IDLE_TEARDOWN_TEST_MS);
+    await pageE.goto(`chrome-extension://${id}/scratch.html`, { waitUntil: "domcontentloaded" });
+    const frameE = await pageE.waitForFrame((fr) => fr.url().includes("engine-frame.html"), {
+      timeout: 15_000,
+    });
+    const tE = Date.now();
+    await frameE.waitForFunction("window.__nvim && window.__nvim.ready === true", {
+      timeout: BOOT_TIMEOUT_MS,
+      polling: 250,
+    });
+    console.log(`[PHASE E] engine ready in ${((Date.now() - tE) / 1000).toFixed(1)}s`);
+
+    // Confirm the frame actually picked up the override (proves ~2.5s takes effect,
+    // not the 5-min default — otherwise the phase would be a false pass on a race).
+    const idleMsSeen = await frameE.evaluate(() => window.__nvimIdleMs);
+    console.log(`[PHASE E] frame window.__nvimIdleMs -> ${JSON.stringify(idleMsSeen)}`);
+    if (idleMsSeen !== IDLE_TEARDOWN_TEST_MS) {
+      await browser.close();
+      return { ok: false, reason: `idle override not applied in frame: __nvimIdleMs is ${JSON.stringify(idleMsSeen)}, expected ${IDLE_TEARDOWN_TEST_MS}` };
+    }
+
+    // Type a distinctive draft and confirm it landed BEFORE the idle timer fires.
+    await frameE.evaluate((marker) => window.__nvim.input("i" + marker + "<Esc>"), IDLE_MARKER);
+    await wait(500);
+    const draftBeforeIdle = await frameE.evaluate(() => window.__nvim.getBufferText());
+    console.log(`[PHASE E] buffer before idle -> ${JSON.stringify(draftBeforeIdle)}`);
+    if (!draftBeforeIdle.includes(IDLE_MARKER)) {
+      await browser.close();
+      return { ok: false, reason: `idle teardown: marker not in buffer before idle: ${JSON.stringify(draftBeforeIdle)}` };
+    }
+
+    // Poll until the worker is torn down: debug.sleeping === true.
+    console.log(`[PHASE E] waiting for idle teardown (sleeping) up to ${SLEEP_POLL_TIMEOUT_MS / 1000}s...`);
+    try {
+      await frameE.waitForFunction("window.__nvim && window.__nvim.sleeping === true", {
+        timeout: SLEEP_POLL_TIMEOUT_MS,
+        polling: 250,
+      });
+    } catch (e) {
+      const st = await frameE
+        .evaluate(() => ({
+          sleeping: window.__nvim?.sleeping,
+          ready: window.__nvim?.ready,
+          memoryCapped: window.__nvim?.memoryCapped,
+        }))
+        .catch(() => null);
+      await browser.close();
+      return { ok: false, reason: `idle teardown: sleeping never became true within ${SLEEP_POLL_TIMEOUT_MS}ms (state=${JSON.stringify(st)}, err=${errText(e)})` };
+    }
+    console.log("[PHASE E] ASSERT OK: engine torn down (sleeping=true)");
+
+    // The sleeping overlay div (💤 ... press any key to resume) must be visible.
+    const sleepOverlay = await frameE.evaluate(() => {
+      const div = Array.from(document.querySelectorAll("div")).find(
+        (d) => d.textContent && d.textContent.includes("💤") && d.textContent.includes("sleeping"),
+      );
+      if (!div) return { found: false };
+      return { found: true, display: getComputedStyle(div).display, text: div.textContent };
+    });
+    console.log(`[PHASE E] sleeping overlay -> ${JSON.stringify(sleepOverlay)}`);
+    if (!sleepOverlay.found || sleepOverlay.display === "none") {
+      await browser.close();
+      return { ok: false, reason: `idle teardown: sleeping overlay not visible (${JSON.stringify(sleepOverlay)})` };
+    }
+    console.log("[PHASE E] ASSERT OK: sleeping overlay visible");
+
+    // Wake it with a real keydown into the frame's document (the frame's keydown
+    // handler routes any key to resume while sleeping). Poll for respawn: the
+    // engine is ready again AND no longer sleeping.
+    console.log("[PHASE E] dispatching keydown to wake the sleeping instance...");
+    await frameE.evaluate(() =>
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true })),
+    );
+    try {
+      await frameE.waitForFunction(
+        "window.__nvim && window.__nvim.ready === true && window.__nvim.sleeping === false",
+        { timeout: BOOT_TIMEOUT_MS, polling: 250 },
+      );
+    } catch (e) {
+      const st = await frameE
+        .evaluate(() => ({ sleeping: window.__nvim?.sleeping, ready: window.__nvim?.ready }))
+        .catch(() => null);
+      await browser.close();
+      return { ok: false, reason: `idle resume: engine did not respawn (state=${JSON.stringify(st)}, err=${errText(e)})` };
+    }
+    console.log("[PHASE E] ASSERT OK: engine respawned (ready=true, sleeping=false)");
+
+    // The restored draft must still contain the marker: teardown -> respawn ->
+    // restore proven end-to-end.
+    const restoredDraft = await frameE.evaluate(() => window.__nvim.getBufferText());
+    console.log(`[PHASE E] buffer after respawn -> ${JSON.stringify(restoredDraft)}`);
+    if (!restoredDraft.includes(IDLE_MARKER)) {
+      await browser.close();
+      return { ok: false, reason: `idle resume: draft not restored after respawn: ${JSON.stringify(restoredDraft)}` };
+    }
+    console.log("[PHASE E] ASSERT OK: draft restored after idle teardown + respawn");
+    console.log("PHASE E: idle teardown -> respawn -> restore");
+
     await browser.close();
     return {
       ok: true,
       lastIdle,
       wakeupLog,
       idleSamples,
+      bootMs,
+      latencyP50: p50,
+      latencyP95: p95,
       persisted: true,
       clipboard,
       configLoaded: true,
       safeModeRecovered: true,
+      idleTeardown: true,
     };
   } catch (e) {
     await browser.close().catch(() => {});
@@ -567,15 +752,20 @@ async function main() {
   if (!result.ok) fail(result.reason);
 
   console.log(`\nlast idle wakeups/sec: ${result.lastIdle} (gate <= ${IDLE_GATE})`);
+  console.log(`PERF boot: ${result.bootMs}ms (budget ${BOOT_BUDGET_MS})`);
+  console.log(`PERF latency: p50=${result.latencyP50}ms p95=${result.latencyP95}ms (budget ${LATENCY_BUDGET_MS})`);
   console.log(`persistence across reload: ${result.persisted ? "PASS" : "FAIL"}`);
   console.log(`clipboard copy: ${result.clipboard}`);
   console.log(`config loads (PHASE C): ${result.configLoaded ? "PASS" : "FAIL"}`);
   console.log(`safe mode recovers (PHASE D): ${result.safeModeRecovered ? "PASS" : "FAIL"}`);
+  console.log(`idle teardown -> respawn -> restore (PHASE E): ${result.idleTeardown ? "PASS" : "FAIL"}`);
   console.log(
-    "\nPASS: engine booted in-browser, buffer round-tripped, idle CPU parked, " +
+    `\nPASS: engine booted in-browser (boot ${result.bootMs}ms, latency p95 ${result.latencyP95}ms), ` +
+      "buffer round-tripped, idle CPU parked, " +
       "draft persisted across reload" +
       (result.clipboard.startsWith("verified") ? ", clipboard copy verified" : " (clipboard soft-skipped)") +
-      ", config loaded from IndexedDB (tabstop=7), safe mode recovered a broken config",
+      ", config loaded from IndexedDB (tabstop=7), safe mode recovered a broken config, " +
+      "idle teardown respawned and restored the draft",
   );
   process.exit(0);
 }

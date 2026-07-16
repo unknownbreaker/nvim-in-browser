@@ -50,7 +50,7 @@ export interface NvimHostCallbacks {
   onStdout(chunk: Uint8Array): void;
   onExit(code: number): void;
   onFatal(message: string): void;
-  onStat?(wakeupsPerSecond: number): void;
+  onStat?(stat: { wakeupsPerSecond: number; memoryBytes: number }): void;
 }
 
 export interface NvimHost {
@@ -423,7 +423,7 @@ export async function startNvimHost(
   const statTimer = setInterval(() => {
     const delta = wakeupCount - lastStatWakeups;
     lastStatWakeups = wakeupCount;
-    cb.onStat?.(delta / 5);
+    cb.onStat?.({ wakeupsPerSecond: delta / 5, memoryBytes: wasmExports.memory.buffer.byteLength });
   }, 5000);
 
   const cleanup = () => clearInterval(statTimer);

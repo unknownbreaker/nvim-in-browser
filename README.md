@@ -73,6 +73,28 @@ no subprocesses and no host network from Lua. So:
 - **Plugin bundling** (staging pure-Lua plugins into the config FS) is a
   planned follow-up; today only files you save via the options page are loaded.
 
+**Hardening.** The editor reclaims resources and guards against runaway configs:
+
+- **Idle sleep / resume.** The scratch page sleeps after a few minutes of
+  inactivity — it saves your draft, disposes the Neovim worker to release its
+  memory and thread, and shows a "💤 sleeping" overlay. Press any key (or click)
+  to resume: a fresh engine boots and your draft is restored where you left off.
+  (The transient overlay editor is exempt — it is already torn down when it
+  closes.)
+- **Memory guard.** A runaway config or plugin that balloons the wasm heap past
+  ~700 MB is stopped rather than crashing the tab: the worker is disposed with a
+  notice and is deliberately *not* auto-respawned (no crash loop). Fix the config
+  and reload.
+- **Performance budgets.** The browser smoke enforces generous headless-CI
+  ceilings to catch gross regressions — cold boot (including the ~11 MB wasm
+  compile) under 6 s, and RPC round-trip latency p95 under 75 ms. Real numbers
+  are far under these (warm boot ~1–2 s, latency ~2–3 ms).
+
+**Engine fidelity** — the differential test suite that checks the WASM engine
+against desktop `nvim --headless` as an oracle (matching it case-for-case on core
+editing) — lives in the separate
+[`nvim-wasi`](https://github.com/unknownbreaker/nvim-wasi) engine repo, not here.
+
 Verification: `npm test` (unit), `node scripts/smoke-nvim.mjs` (engine in
 Node), `node scripts/browser-smoke.mjs` and `node scripts/overlay-smoke.mjs`
 (real Chrome; needs Chrome for Testing via

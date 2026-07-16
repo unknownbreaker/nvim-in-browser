@@ -1,6 +1,6 @@
 // Engine frame: a full-page canvas that boots the nvim engine worker, renders
 // its grid, and forwards keyboard input. Runs as its own extension page so the
-// engine worker and its 8 MB wasm are isolated from host pages.
+// engine worker and its ~11 MB wasm are isolated from host pages.
 //
 // Modes (via ?mode= query param):
 //   full  — used by the scratch page; boots immediately, focuses the canvas.
@@ -8,7 +8,7 @@
 //           postMessage from the parent, seeds the buffer, and streams buffer
 //           text back on change (debounced) plus deactivate/ready signals.
 import { NvimClient } from "../engine/client";
-import { openScratchStore, serializeError } from "../scratch/scratch-store";
+import { openScratchStore, serializeError, type ScratchStore } from "../scratch/scratch-store";
 import { openConfigStore } from "../storage/config-store";
 import { GridRenderer } from "../ui/grid-renderer";
 import { isEscapeChord, keyEventToNvim } from "../ui/keymap";
@@ -44,6 +44,14 @@ const debug = {
   // Stays false for clean boots and successful config boots. Read by smokes.
   safeMode: false,
   wakeupsPerSecond: 0,
+  // Live wasm heap size (bytes) from the latest stat sample. 0 until the first
+  // 5s stat arrives. Feeds the memory watchdog and is read by smokes.
+  memoryBytes: 0,
+  // True once the memory watchdog tripped and stopped the editor (no respawn).
+  memoryCapped: false,
+  // True while an idle-torn-down scratch instance is sleeping (worker disposed,
+  // waiting for a keydown/click to respawn). Read by the idle-teardown smoke.
+  sleeping: false,
   getBufferText: (): Promise<string> => currentText(),
   input: (keys: string): void => client.input(keys),
   // Generic RPC passthrough so a headless smoke can query/mutate nvim state
@@ -51,6 +59,29 @@ const debug = {
   request: (method: string, params: unknown[]): Promise<unknown> => client.request(method, params),
 };
 (window as unknown as { __nvim: typeof debug }).__nvim = debug;
+
+// Resource-lifecycle budgets (scratch/full mode). A runaway config/plugin that
+// blows past MEM_CAP_BYTES is stopped (no respawn — avoid a crash loop); an
+// instance left untouched for IDLE_TEARDOWN_MS is torn down and respawned on the
+// next input to reclaim its ~11 MB wasm + worker.
+const MEM_CAP_BYTES = 700 * 1024 * 1024;
+const IDLE_TEARDOWN_MS = 5 * 60 * 1000;
+
+// Idle-teardown state (scratch/full mode only; stays inert in embed mode).
+// `armIdleTimer` restarts the idle countdown on any input; `resumeFromSleep`
+// respawns a torn-down instance. Both are installed by installIdleLifecycle and
+// left null in embed mode. `idleTimer` holds the pending teardown timeout.
+let armIdleTimer: (() => void) | null = null;
+let resumeFromSleep: (() => Promise<void>) | null = null;
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
+let sleepingOverlay: HTMLDivElement | null = null;
+
+// Resolve the idle-teardown delay at arm time so a smoke can shorten it by
+// setting `window.__nvimIdleMs` before boot (avoids waiting the full 5 min).
+function idleTeardownMs(): number {
+  const override = (window as unknown as { __nvimIdleMs?: number }).__nvimIdleMs;
+  return typeof override === "number" && override > 0 ? override : IDLE_TEARDOWN_MS;
+}
 
 // Final buffer text carried out-of-band by the VimLeavePre autocmd (see
 // init()). `:q`/`:wq` can fire after the last debounce flush, so onExit/onFatal
@@ -94,6 +125,19 @@ document.addEventListener("keydown", (ev) => {
     void deactivate();
     return;
   }
+  // A sleeping (idle-torn-down) scratch instance wakes on any key: that key just
+  // resumes the engine — it is NOT forwarded as input. Checked before IME/input
+  // so the wake always wins.
+  if (debug.sleeping) {
+    ev.preventDefault();
+    void resumeFromSleep?.();
+    return;
+  }
+  // Editor stopped by the memory watchdog: swallow input, there is no live worker.
+  if (debug.memoryCapped) {
+    ev.preventDefault();
+    return;
+  }
   // Keys that are feeding an active IME composition (isComposing) or the
   // pre-composition sentinel (keyCode 229) must not be forwarded to nvim — the
   // composed text arrives via compositionend instead. Checked after the escape
@@ -104,6 +148,8 @@ document.addEventListener("keydown", (ev) => {
     ev.preventDefault();
     client.input(keys);
   }
+  // Any real input restarts the idle countdown (no-op outside scratch mode).
+  armIdleTimer?.();
 });
 
 function decodeLine(line: unknown): string {
@@ -146,9 +192,25 @@ function wireClient(c: NvimClient): void {
     ime.style.top = `${p.y}px`;
     ime.style.height = `${p.height}px`;
   };
-  c.onStat = (wps) => {
-    debug.wakeupsPerSecond = wps;
-    console.log(`[nvim] poll wakeups/sec: ${wps}`);
+  c.onStat = (stat) => {
+    debug.wakeupsPerSecond = stat.wakeupsPerSecond;
+    debug.memoryBytes = stat.memoryBytes;
+    console.log(
+      `[nvim] poll wakeups/sec: ${stat.wakeupsPerSecond}, mem: ${stat.memoryBytes} bytes`,
+    );
+    // Memory watchdog: a runaway config/plugin that blows past the cap is stopped
+    // outright. Dispose the worker, cancel any pending idle teardown, and show a
+    // notice — deliberately NO respawn, so a memory-hungry config can't crash-loop.
+    if (stat.memoryBytes > MEM_CAP_BYTES && !debug.memoryCapped) {
+      debug.memoryCapped = true;
+      debug.ready = false;
+      if (idleTimer !== null) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+      c.dispose();
+      showMemoryCapNotice();
+    }
   };
   c.onExit = postDeactivateFinal;
   c.onFatal = postDeactivateFinal;
@@ -239,6 +301,39 @@ function showSafeModeBanner(): void {
     "position:fixed;top:0;left:0;right:0;z-index:9999;padding:4px 8px;" +
     "font:12px system-ui,sans-serif;color:#000;background:#f5c518;text-align:center;";
   document.body.appendChild(banner);
+}
+
+// Memory-watchdog notice: the editor was stopped for exceeding MEM_CAP_BYTES.
+// Best-effort banner; debug.memoryCapped is the authoritative signal for smokes.
+function showMemoryCapNotice(): void {
+  const notice = document.createElement("div");
+  notice.textContent = "editor used too much memory and was stopped";
+  notice.style.cssText =
+    "position:fixed;top:0;left:0;right:0;z-index:9999;padding:4px 8px;" +
+    "font:12px system-ui,sans-serif;color:#fff;background:#c0392b;text-align:center;";
+  document.body.appendChild(notice);
+}
+
+// Sleeping overlay: shown while an idle-torn-down scratch instance waits for a
+// keydown/click to respawn. Created lazily and toggled (not recreated) so resume
+// can simply hide it. The message is parameterized so a failed resume can reuse
+// the same overlay to prompt a retry. debug.sleeping is the authoritative signal
+// for smokes.
+function showSleepingOverlay(message = "💤 sleeping — press any key to resume"): void {
+  if (!sleepingOverlay) {
+    sleepingOverlay = document.createElement("div");
+    sleepingOverlay.style.cssText =
+      "position:fixed;inset:0;z-index:9998;display:flex;align-items:center;" +
+      "justify-content:center;font:16px system-ui,sans-serif;color:#eee;" +
+      "background:rgba(0,0,0,0.72);cursor:pointer;";
+    document.body.appendChild(sleepingOverlay);
+  }
+  sleepingOverlay.textContent = message;
+  sleepingOverlay.style.display = "flex";
+}
+
+function hideSleepingOverlay(): void {
+  if (sleepingOverlay) sleepingOverlay.style.display = "none";
 }
 
 // Boot nvim, falling back to a clean "safe mode" if the user config fails. A
@@ -376,8 +471,14 @@ if (mode === "embed") {
   void startScratch();
 }
 
-async function startScratch(): Promise<void> {
-  const store = openScratchStore();
+// Boot one scratch instance: boot nvim (with safe-mode fallback), reinstall the
+// buffer hooks, pull the clipboard, restore the saved draft, and wire the
+// debounced autosave. Shared by the initial startScratch AND by the idle respawn
+// (which first swaps in a fresh, freshly-wired client) so BOTH paths run the
+// exact same init — no duplicated setup that could drift. The one-time global
+// listeners (flush-on-hide, idle lifecycle) live in startScratch, not here, so
+// respawn never stacks duplicates.
+async function bootScratchInstance(store: ScratchStore): Promise<void> {
   let saved: string | null = null;
   try {
     saved = await store.load();
@@ -386,7 +487,7 @@ async function startScratch(): Promise<void> {
   }
   await bootWithSafeMode(cols, rows);
   debug.ready = true;
-  const channel = await installBufferHooks();
+  await installBufferHooks();
   void syncClipboardIn();
   if (saved !== null && saved.length > 0) {
     await client.request("nvim_buf_set_lines", [0, 0, -1, false, saved.split("\n")]);
@@ -405,7 +506,14 @@ async function startScratch(): Promise<void> {
     }, 400);
   };
   scratchOnChange = scheduleSave; // consumed by the onEvent handler
-  // Best-effort flush when the tab is hidden or closing.
+  ime.focus();
+}
+
+async function startScratch(): Promise<void> {
+  const store = openScratchStore();
+  await bootScratchInstance(store);
+  // Best-effort flush when the tab is hidden or closing. Registered once; it
+  // reads the live module `client`, so it survives idle respawns transparently.
   const flush = () => {
     void currentText().then((t) => store.save(t)).catch(() => {});
   };
@@ -413,6 +521,103 @@ async function startScratch(): Promise<void> {
     if (document.visibilityState === "hidden") flush();
   });
   window.addEventListener("beforeunload", flush);
-  void channel; // channel already used by installBufferHooks; kept for clarity
-  ime.focus();
+  // Idle-instance teardown + respawn (scratch/full mode only).
+  installIdleLifecycle(store);
+}
+
+// Idle-instance teardown (scratch/full mode only — embed mode is already
+// transient, torn down on deactivate). After IDLE_TEARDOWN_MS with no input, save
+// the draft, dispose the worker to reclaim its wasm + thread, and show the
+// sleeping overlay. The next keydown (see the document keydown handler) or a click
+// respawns a fresh client and re-runs the full scratch init via bootScratchInstance,
+// restoring the draft.
+function installIdleLifecycle(store: ScratchStore): void {
+  const sleep = async (): Promise<void> => {
+    if (debug.sleeping || debug.memoryCapped) return;
+    // Capture the draft while the client is still live (currentText needs it),
+    // BEFORE flipping any state, so the read isn't racing a disposed worker.
+    let draft: string | null = null;
+    try {
+      draft = await currentText();
+    } catch (e) {
+      console.warn("[scratch] idle read failed:", serializeError(e));
+    }
+    // If the memory watchdog tripped during the read await it already disposed the
+    // worker and showed its notice — bail before transitioning to the (resurrectable)
+    // sleeping state and before a second dispose.
+    if (debug.memoryCapped) return;
+    // Flip to sleeping (and show the overlay) BEFORE disposing/saving so a keydown
+    // or click during the save window is routed to the wake path (resumeFromSleep)
+    // rather than client.input() on the about-to-be-disposed client, which would
+    // silently drop the keystroke and leave the restored draft one edit stale.
+    debug.ready = false;
+    debug.sleeping = true;
+    showSleepingOverlay();
+    client.dispose();
+    if (draft !== null) {
+      try {
+        await store.save(draft);
+      } catch (e) {
+        console.warn("[scratch] idle save failed:", serializeError(e));
+      }
+    }
+    // Re-check after the save await: if the watchdog capped memory in the meantime,
+    // the memory-capped instance must NOT be resurrectable, so leave the cap notice
+    // in place and drop out of the sleeping (respawnable) state.
+    if (debug.memoryCapped) {
+      debug.sleeping = false;
+      hideSleepingOverlay();
+    }
+  };
+  armIdleTimer = () => {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => void sleep(), idleTeardownMs());
+  };
+  // Reentrancy guard: rapid wakes (several keydowns before the respawn finishes)
+  // must not kick off overlapping boots.
+  let resuming = false;
+  resumeFromSleep = async () => {
+    // memoryCapped instances are deliberately non-resurrectable — the watchdog
+    // stopped the editor to avoid a crash loop, so never respawn one.
+    if (!debug.sleeping || debug.memoryCapped || resuming) return;
+    resuming = true;
+    // The prior instance is gone; the engine is not live until the respawn boot
+    // below succeeds (which sets debug.ready true again). Clear it now so a failed
+    // resume can't leave a stale ready=true alongside sleeping=true.
+    debug.ready = false;
+    // Fresh client + identical wiring, then the SAME init the first boot ran.
+    client = makeClient();
+    wireClient(client);
+    try {
+      await bootScratchInstance(store);
+      // Respawn succeeded: instance is live again.
+      debug.sleeping = false;
+      hideSleepingOverlay();
+      armIdleTimer?.();
+    } catch (e) {
+      // Respawn boot rejected (e.g. a transient RPC failure in installBufferHooks
+      // or the draft restore). Terminate this failed worker before retrying, or
+      // each retry would orphan a live Worker (makeClient spawns one eagerly).
+      client.dispose();
+      // Do NOT wedge: keep debug.sleeping true so the NEXT keydown/click re-enters
+      // here and retries (which will makeClient() a fresh worker), and update the
+      // overlay to say so. resuming is reset in finally, so the retry isn't blocked.
+      console.warn("[scratch] resume failed, will retry on next input:", serializeError(e));
+      showSleepingOverlay("⚠ resume failed — press any key to retry");
+    } finally {
+      resuming = false;
+    }
+  };
+  // A click anywhere also wakes a sleeping instance (the overlay is clickable).
+  // When awake, a click counts as input too, so it restarts the idle countdown —
+  // matching the keydown path (the plan resets the idle timer on ANY input).
+  document.addEventListener("click", () => {
+    if (debug.sleeping) {
+      void resumeFromSleep?.();
+      return;
+    }
+    if (debug.memoryCapped) return;
+    armIdleTimer?.();
+  });
+  armIdleTimer();
 }
