@@ -54,6 +54,13 @@ await cp(
   path.join(outDir, "engine-frame.html"),
 );
 
+// Toolbar / extension icons (referenced by manifest icons + action.default_icon).
+const iconDir = path.join(outDir, "icons");
+await mkdir(iconDir, { recursive: true });
+for (const size of [16, 32, 48, 128]) {
+  await cp(path.join(root, "icons", `icon-${size}.png`), path.join(iconDir, `icon-${size}.png`));
+}
+
 // Copy the Neovim engine assets alongside the worker bundle. The engine
 // (asyncified wasm + runtime tarball) is built and published by the separate
 // nvim-wasi repo and fetched here as a SHA-pinned release artifact into
