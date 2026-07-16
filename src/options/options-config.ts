@@ -24,6 +24,11 @@ function status(message: string, kind: "ok" | "err" | "info"): void {
 function refreshShell(): void {
   document.dispatchEvent(new CustomEvent("nib-refresh"));
 }
+// Signal the syntax-highlight overlay to repaint after a PROGRAMMATIC editor
+// value change (select/onFetch/onClear set editor.value without firing "input").
+function editorSet(): void {
+  document.dispatchEvent(new CustomEvent("nib-editor-set"));
+}
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -64,6 +69,87 @@ async function switchTo(name: string): Promise<void> {
   await select(name);
 }
 
+// A folder-nested view of the flat relpath list. Files hang off the node whose
+// folder path they live in; folders nest via `folders`.
+interface TreeNode {
+  folders: Map<string, TreeNode>;
+  files: string[]; // full relpaths, e.g. "lua/opts.lua"
+}
+// Collapse state for tree folders, keyed by full folder path (e.g. "lua/plugins").
+// Default = expanded (absent). Module-level so it survives the frequent
+// refreshList() re-renders (select/save/add all re-render the list).
+const collapsedFolders = new Set<string>();
+
+function buildTree(names: string[]): TreeNode {
+  const root: TreeNode = { folders: new Map(), files: [] };
+  for (const name of names) {
+    const parts = name.split("/");
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const dir = parts[i];
+      let child = node.folders.get(dir);
+      if (!child) {
+        child = { folders: new Map(), files: [] };
+        node.folders.set(dir, child);
+      }
+      node = child;
+    }
+    node.files.push(name);
+  }
+  return root;
+}
+
+// Render a tree node into `ul`. Folders (sorted, alpha) come before files
+// (sorted, alpha). Each level is indented by depth. Paths are user-supplied so
+// all labels go in via textContent — never innerHTML.
+function renderTree(node: TreeNode, ul: HTMLUListElement, depth: number, folderPath: string): void {
+  const indent = `${8 + depth * 14}px`;
+  for (const folderName of [...node.folders.keys()].sort()) {
+    const path = folderPath ? `${folderPath}/${folderName}` : folderName;
+    const collapsed = collapsedFolders.has(path);
+    const li = document.createElement("li");
+    const row = document.createElement("button");
+    row.type = "button";
+    row.textContent = `${collapsed ? "▸" : "▾"} ${folderName}/`;
+    row.title = `${path}/`;
+    row.style.width = "100%";
+    row.style.textAlign = "left";
+    row.style.marginBottom = "4px";
+    row.style.paddingLeft = indent;
+    row.addEventListener("click", () => {
+      if (collapsedFolders.has(path)) collapsedFolders.delete(path);
+      else collapsedFolders.add(path);
+      void refreshList();
+    });
+    li.append(row);
+    if (!collapsed) {
+      const childUl = document.createElement("ul");
+      childUl.style.listStyle = "none";
+      childUl.style.padding = "0";
+      childUl.style.margin = "0";
+      renderTree(node.folders.get(folderName) as TreeNode, childUl, depth + 1, path);
+      li.append(childUl);
+    }
+    ul.append(li);
+  }
+  for (const full of [...node.files].sort()) {
+    const base = full.split("/").pop() ?? full;
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = base; // basename only; full path in the title
+    btn.title = full;
+    btn.style.width = "100%";
+    btn.style.textAlign = "left";
+    btn.style.marginBottom = "4px";
+    btn.style.paddingLeft = indent;
+    if (full === current) btn.className = "primary";
+    btn.addEventListener("click", () => void switchTo(full));
+    li.append(btn);
+    ul.append(li);
+  }
+}
+
 async function refreshList(): Promise<void> {
   const list = el<HTMLUListElement>("config-list");
   let files: Record<string, string>;
@@ -73,22 +159,10 @@ async function refreshList(): Promise<void> {
     status(`Failed to load config: ${describe(err)}`, "err");
     return;
   }
-  const names = Object.keys(files).sort();
-  if (!names.includes("init.lua")) names.unshift("init.lua"); // always offer init.lua
+  const names = Object.keys(files);
+  if (!names.includes("init.lua")) names.push("init.lua"); // always offer init.lua
   list.textContent = "";
-  for (const name of names) {
-    const li = document.createElement("li");
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.textContent = name;
-    btn.style.width = "100%";
-    btn.style.textAlign = "left";
-    btn.style.marginBottom = "4px";
-    if (name === current) btn.className = "primary";
-    btn.addEventListener("click", () => void switchTo(name));
-    li.append(btn);
-    list.append(li);
-  }
+  renderTree(buildTree(names), list, 0, "");
 }
 
 async function select(name: string): Promise<void> {
@@ -99,6 +173,7 @@ async function select(name: string): Promise<void> {
     const files = await store.loadFiles();
     el<HTMLTextAreaElement>("editor").value = files[name] ?? "";
     savedValue = el<HTMLTextAreaElement>("editor").value;
+    editorSet();
     syncSaveButton();
   } catch (err) {
     status(`Failed to open ${name}: ${describe(err)}`, "err");
@@ -212,6 +287,7 @@ async function onFetch(): Promise<void> {
     el<HTMLLabelElement>("config-editing-label").textContent = "init.lua";
     savedValue = files["init.lua"] ?? "";
     el<HTMLTextAreaElement>("editor").value = text;
+    editorSet();
     syncSaveButton(); // fetched text differs from saved -> Save enabled
     await refreshList();
     status("Fetched ✓ into init.lua — review, then Save.", "ok");
@@ -227,6 +303,7 @@ async function onClear(): Promise<void> {
   try {
     await store.clear();
     el<HTMLTextAreaElement>("editor").value = "";
+    editorSet();
     status("Config cleared. (reload your editor)", "ok");
     await select("init.lua");
   } catch (err) {

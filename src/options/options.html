@@ -63,8 +63,18 @@
         width: 100%;
         min-height: 340px;
         resize: vertical;
-        background: var(--surface);
-        color: var(--text);
+        /* block, not the default inline-block: otherwise the wrapper's line box
+           adds ~5px of baseline descent below the textarea and the behind-<pre>
+           (inset:0) ends up that much taller, breaking pixel alignment. */
+        display: block;
+        /* Text is transparent so the highlight <pre> behind shows through;
+           the caret stays visible. Background is transparent so the <pre>'s
+           surface color is what's seen. */
+        background: transparent;
+        color: transparent;
+        caret-color: var(--text);
+        position: relative;
+        z-index: 1;
         border: 1px solid var(--overlay);
         border-radius: 8px;
         padding: 14px 16px;
@@ -72,6 +82,55 @@
         font-size: 0.9rem;
         line-height: 1.5;
         tab-size: 2;
+        /* Match the highlight <pre>'s reserved gutter so both layers wrap text
+           at the same column when the buffer scrolls (keeps colored glyphs
+           aligned under the transparent caret text). */
+        scrollbar-gutter: stable;
+      }
+      /* Wrapper (built in JS by initEditorHighlight) positions the highlight
+         layer behind the textarea. */
+      .editor-highlight-wrap {
+        position: relative;
+      }
+      /* The highlight layer. MUST share identical box metrics with the textarea
+         (font, size, line-height, padding, border width, radius, tab-size, and
+         wrapping model) so colored text lands under the transparent text. */
+      pre#editor-highlight {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        margin: 0;
+        overflow: hidden;
+        pointer-events: none;
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid transparent;
+        border-radius: 8px;
+        padding: 14px 16px;
+        font-family: var(--mono);
+        font-size: 0.9rem;
+        line-height: 1.5;
+        tab-size: 2;
+        white-space: pre-wrap;
+        word-break: break-word;
+        /* Reserve the scrollbar gutter so the pre's text column width matches
+           the textarea's whether or not its vertical scrollbar is showing —
+           otherwise soft-wrap points diverge and colored glyphs drift off the
+           caret once the buffer scrolls. */
+        scrollbar-gutter: stable;
+      }
+      pre#editor-highlight .tok-comment {
+        color: var(--subtext);
+        font-style: italic;
+      }
+      pre#editor-highlight .tok-string {
+        color: var(--green);
+      }
+      pre#editor-highlight .tok-number {
+        color: var(--yellow);
+      }
+      pre#editor-highlight .tok-keyword {
+        color: var(--accent);
       }
       textarea#editor:focus,
       input[type="url"]:focus,
