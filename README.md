@@ -141,12 +141,15 @@ release tag, and each file's byte size + SHA-256.
 
 **Git hooks.** `npm ci`/`npm install` runs a `prepare` step that points
 `core.hooksPath` at `scripts/git-hooks/`, enabling a **`post-merge`** hook that
-keeps your working tree current after a `git pull`: it runs `npm ci` if
-`package.json` changed, `npm run fetch-assets` if the pinned `nvim-wasi` version
-(`engine.lock.json`) changed, and `npm run build` if anything under `src/`
-changed. Enable it manually with `git config core.hooksPath scripts/git-hooks`.
-(It fires only on a merge-style pull; a rebase pull skips `post-merge` — run the
-three commands by hand then.)
+refreshes your build after a `git pull`: it reinstalls deps if `package.json`
+changed, re-fetches the pinned `nvim-wasi` engine if `engine.lock.json` changed,
+and then **always runs `npm run build`** so the loaded extension is current
+(reload it at `chrome://extensions`). Enable it manually with `git config
+core.hooksPath scripts/git-hooks`. Caveats: it fires only on a merge-style pull
+(a rebase pull skips `post-merge`), and because git runs hooks without your
+login shell, an **nvm-managed `npm` must be on `PATH`** — a normal terminal is
+fine, but a GUI/IDE git client may not source your profile, in which case pull
+from a terminal (or run `npm run build` yourself).
 
 ## Release
 
