@@ -78,7 +78,7 @@ async function main() {
     onStdout: (chunk) => rpc.feed(chunk),
     onExit: (code) => (exited = code),
     onFatal: (message) => (fatal = message),
-    onStat: (wakeupsPerSecond) => statSamples.push(wakeupsPerSecond),
+    onStat: (stat) => statSamples.push(stat.wakeupsPerSecond),
   });
 
   console.log("nvim booted; sending RPC...");

@@ -17,7 +17,7 @@ export class NvimClient {
   // fatal still rejects the start() promise; this covers the post-ready case,
   // where rejecting a settled promise would be a silent no-op.
   onFatal: (message: string) => void = () => {};
-  onStat: (wps: number) => void = () => {};
+  onStat: (stat: { wakeupsPerSecond: number; memoryBytes: number }) => void = () => {};
   // Pass-through for non-redraw notifications (e.g. custom rpcnotify events like
   // `wasm_text_changed`). Redraw batches go to onRedraw and never reach here.
   onEvent: (method: string, args: unknown[]) => void = () => {};
@@ -76,7 +76,7 @@ export class NvimClient {
             reject(new Error(m.message));
           }
         } else if (m.type === "stat") {
-          this.onStat(m.wakeupsPerSecond);
+          this.onStat({ wakeupsPerSecond: m.wakeupsPerSecond, memoryBytes: m.memoryBytes });
         }
       };
       // configFiles data arrays are small; structured-clone copies them (no
