@@ -306,6 +306,134 @@
         margin-top: 4px;
       }
 
+      /* ---- Plugins pane: subheads, installed cards, curated shelf ---- */
+      .plugin-subhead {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: var(--text);
+        margin: 24px 0 10px;
+      }
+      .plugin-subhead-note {
+        font-size: 0.8rem;
+        font-weight: 400;
+        color: var(--subtext);
+      }
+      .plugin-grid,
+      .shelf-grid {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: 12px;
+      }
+      .plugin-card,
+      .shelf-card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        background: var(--surface-2);
+        border: 1px solid var(--overlay);
+        border-radius: 8px;
+        padding: 14px 16px;
+      }
+      .plugin-card-header,
+      .shelf-card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .plugin-card-name,
+      .shelf-card-name {
+        font-size: 0.95rem;
+        word-break: break-word;
+      }
+      .plugin-card-meta {
+        font-size: 0.78rem;
+        color: var(--subtext);
+        font-family: var(--mono);
+        word-break: break-word;
+      }
+      .pill {
+        font-size: 0.72rem;
+        font-weight: 600;
+        line-height: 1;
+        border-radius: 10px;
+        padding: 3px 8px;
+        white-space: nowrap;
+        flex: 0 0 auto;
+      }
+      .pill-on {
+        color: var(--green);
+        background: rgba(166, 227, 161, 0.15);
+      }
+      .pill-off {
+        color: var(--subtext);
+        background: var(--surface);
+      }
+      .plugin-card-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin-top: auto;
+      }
+      .plugin-card-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.82rem;
+        color: var(--subtext);
+        cursor: pointer;
+        margin-right: auto;
+      }
+      .plugin-card-toggle input[type="checkbox"] {
+        width: 15px;
+        height: 15px;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+      .plugin-card-actions button {
+        padding: 6px 12px;
+        font-size: 0.82rem;
+      }
+      .tag {
+        font-size: 0.7rem;
+        font-weight: 600;
+        line-height: 1;
+        border-radius: 10px;
+        padding: 3px 8px;
+        color: var(--accent);
+        background: rgba(137, 180, 250, 0.15);
+        white-space: nowrap;
+        flex: 0 0 auto;
+      }
+      .shelf-card-blurb {
+        font-size: 0.82rem;
+        color: var(--subtext);
+        margin: 0;
+      }
+      .shelf-card-repo {
+        font-size: 0.75rem;
+        color: var(--subtext);
+        font-family: var(--mono);
+        word-break: break-word;
+      }
+      .shelf-card-install {
+        margin-top: auto;
+        align-self: flex-start;
+        padding: 6px 14px;
+        font-size: 0.82rem;
+      }
+      .shelf-card-install:disabled {
+        cursor: default;
+        color: var(--green);
+        border-color: var(--overlay);
+        background: var(--surface);
+        opacity: 1;
+      }
+
       @media (max-width: 640px) {
         .shell {
           grid-template-columns: 1fr;
@@ -489,7 +617,13 @@
               </label>
             </div>
 
-            <ul id="plugin-list" style="list-style: none; padding: 0; margin: 16px 0 0"></ul>
+            <h2 class="plugin-subhead">
+              Recommended <span class="plugin-subhead-note">(pure-Lua, sandbox-safe)</span>
+            </h2>
+            <div id="plugin-shelf" class="shelf-grid"></div>
+
+            <h2 class="plugin-subhead">Installed</h2>
+            <ul id="plugin-list" class="plugin-grid"></ul>
           </section>
 
           <!-- ============================ OVERVIEW PANE ========================== -->

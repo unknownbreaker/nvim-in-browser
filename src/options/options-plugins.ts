@@ -7,6 +7,7 @@ import { openPluginStore, isSafePluginName, type PluginRecord } from "../storage
 import { fetchGithubPlugin, GithubFetchError } from "../plugins/github-fetch";
 import { openTokenStore } from "../storage/token-store";
 import { readFolderUpload } from "./folder-upload";
+import { CURATED_PLUGINS, type CuratedPlugin } from "./plugin-catalog";
 
 const store = openPluginStore();
 const tokenStore = openTokenStore();
@@ -56,6 +57,10 @@ async function render(): Promise<void> {
   }
   // Keep the plugins count badge + Overview in sync after any (re-)render.
   refreshShell();
+  // Compute the installed-name set ONCE and drive the shelf off it, so the
+  // curated shelf and the installed grid always reflect the same store read.
+  const installedNames = new Set(plugins.map((p) => p.name));
+  renderShelf(installedNames);
   list.textContent = "";
   if (plugins.length === 0) {
     const empty = document.createElement("li");
@@ -66,37 +71,51 @@ async function render(): Promise<void> {
     return;
   }
   for (const p of plugins.sort((a, b) => a.name.localeCompare(b.name))) {
-    list.append(renderRow(p));
+    list.append(renderCard(p));
   }
 }
 
-function renderRow(p: PluginRecord): HTMLLIElement {
+function renderCard(p: PluginRecord): HTMLLIElement {
   const li = document.createElement("li");
-  li.className = "checkbox-row";
-  li.style.marginBottom = "8px";
+  li.className = "plugin-card";
 
-  const toggle = document.createElement("input");
-  toggle.type = "checkbox";
-  toggle.checked = p.enabled;
-  toggle.addEventListener("change", () => void onToggle(p.name, toggle));
-
-  const label = document.createElement("label");
-  label.style.flex = "1 1 auto";
-  const src = p.source === "github" ? `github: ${p.repo}@${p.ref}` : "uploaded";
+  // Header: name (strong) + an Enabled/Disabled status pill.
+  const header = document.createElement("div");
+  header.className = "plugin-card-header";
   // Build with textContent, not innerHTML: p.repo/p.ref are user-supplied, so
   // interpolating them into markup would be an injection vector (self-XSS on a
   // tampered IndexedDB record).
   const nameEl = document.createElement("strong");
+  nameEl.className = "plugin-card-name";
   nameEl.textContent = p.name;
-  const meta = document.createElement("span");
-  meta.className = "hint";
-  meta.style.color = "var(--subtext)";
-  meta.textContent = ` ${src} · ${p.files.length} files`;
-  label.append(nameEl, meta);
+  const pill = document.createElement("span");
+  pill.className = p.enabled ? "pill pill-on" : "pill pill-off";
+  pill.textContent = p.enabled ? "Enabled" : "Disabled";
+  header.append(nameEl, pill);
+
+  // Meta: for github "owner/repo@ref · N files"; for upload "uploaded · N files".
+  const meta = document.createElement("div");
+  meta.className = "plugin-card-meta";
+  meta.textContent =
+    p.source === "github"
+      ? `${p.repo}@${p.ref} · ${p.files.length} files`
+      : `uploaded · ${p.files.length} files`;
 
   const actions = document.createElement("div");
-  actions.className = "row";
-  actions.style.margin = "0";
+  actions.className = "plugin-card-actions";
+
+  // Enable/disable toggle — same store.setEnabled path via onToggle.
+  const toggleLabel = document.createElement("label");
+  toggleLabel.className = "plugin-card-toggle";
+  const toggle = document.createElement("input");
+  toggle.type = "checkbox";
+  toggle.checked = p.enabled;
+  toggle.addEventListener("change", () => void onToggle(p.name, toggle, pill));
+  const toggleText = document.createElement("span");
+  toggleText.textContent = "Enabled";
+  toggleLabel.append(toggle, toggleText);
+  actions.append(toggleLabel);
+
   if (p.source === "github") {
     const refresh = document.createElement("button");
     refresh.type = "button";
@@ -111,14 +130,86 @@ function renderRow(p: PluginRecord): HTMLLIElement {
   remove.addEventListener("click", () => void onRemove(p.name));
   actions.append(remove);
 
-  li.append(toggle, label, actions);
+  li.append(header, meta, actions);
   return li;
 }
 
-async function onToggle(name: string, box: HTMLInputElement): Promise<void> {
+// --- Curated shelf: recommended pure-Lua plugins with one-click install ------
+// Rebuilt on every render() off the installed-name set, so a card flips to
+// "Installed ✓" the moment its plugin lands in the store (and back if removed).
+function renderShelf(installedNames: Set<string>): void {
+  const shelf = el<HTMLDivElement>("plugin-shelf");
+  shelf.textContent = "";
+  for (const entry of CURATED_PLUGINS) {
+    shelf.append(renderShelfCard(entry, installedNames.has(entry.name)));
+  }
+}
+
+function renderShelfCard(entry: CuratedPlugin, installed: boolean): HTMLDivElement {
+  const card = document.createElement("div");
+  card.className = "shelf-card";
+
+  const header = document.createElement("div");
+  header.className = "shelf-card-header";
+  // Static catalog strings, but built with textContent for consistency.
+  const nameEl = document.createElement("strong");
+  nameEl.className = "shelf-card-name";
+  nameEl.textContent = entry.name;
+  const tag = document.createElement("span");
+  tag.className = "tag";
+  tag.textContent = entry.category;
+  header.append(nameEl, tag);
+
+  const blurb = document.createElement("p");
+  blurb.className = "shelf-card-blurb";
+  blurb.textContent = entry.blurb;
+
+  const repoEl = document.createElement("div");
+  repoEl.className = "shelf-card-repo";
+  repoEl.textContent = entry.repo;
+
+  const install = document.createElement("button");
+  install.type = "button";
+  install.className = "shelf-card-install";
+  if (installed) {
+    install.disabled = true;
+    install.textContent = "Installed ✓";
+  } else {
+    install.classList.add("primary");
+    install.textContent = "Install";
+    install.addEventListener("click", () => void onShelfInstall(entry, install));
+  }
+
+  card.append(header, blurb, repoEl, install);
+  return card;
+}
+
+async function onShelfInstall(entry: CuratedPlugin, btn: HTMLButtonElement): Promise<void> {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Installing…";
+  // Blank ref -> installFromGithub lets fetchGithubPlugin resolve the repo's
+  // default branch (master vs main vs …). On success it re-renders, which
+  // rebuilds this shelf and detaches this button (flipped to "Installed ✓").
+  await installFromGithub(entry.repo, "");
+  // Only reached with the button still attached if the install did NOT succeed
+  // (no re-render happened); restore it so the user can retry.
+  if (btn.isConnected) {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+async function onToggle(name: string, box: HTMLInputElement, pill?: HTMLElement): Promise<void> {
   const enabled = box.checked;
   try {
     await store.setEnabled(name, enabled);
+    // Keep the card's status pill in sync with the toggle (it would otherwise
+    // stay stale until the next full render() after an install/remove).
+    if (pill) {
+      pill.className = enabled ? "pill pill-on" : "pill pill-off";
+      pill.textContent = enabled ? "Enabled" : "Disabled";
+    }
     refreshShell();
     status(enabled ? `${name} enabled (reload your editor).` : `${name} disabled (reload your editor).`, "info");
   } catch (err) {
@@ -152,11 +243,13 @@ async function onRefresh(p: PluginRecord): Promise<void> {
   }
 }
 
-async function onAddGithub(): Promise<void> {
-  const repo = el<HTMLInputElement>("plugin-repo").value.trim();
-  // Blank ref -> fetchGithubPlugin resolves the repo's default branch (main vs
-  // master vs …), so the user doesn't have to know which a repo uses.
-  const ref = el<HTMLInputElement>("plugin-ref").value.trim();
+// Shared install core for both the manual "Add from GitHub" button and the
+// curated shelf. Validates owner/repo, guards against a duplicate name, fetches
+// over the GitHub API (blank ref -> the repo's default branch is auto-detected),
+// stages it, then re-renders (which also refreshes the shelf). Errors are caught
+// and surfaced via fetchErrorMessage, so this never throws — callers manage only
+// their own button state.
+async function installFromGithub(repo: string, ref: string): Promise<void> {
   if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) {
     status("Enter a plugin as owner/repo (e.g. echasnovski/mini.nvim).", "info");
     return;
@@ -166,8 +259,6 @@ async function onAddGithub(): Promise<void> {
     status(`Unsafe plugin name derived from repo: ${name}`, "err");
     return;
   }
-  const btn = el<HTMLButtonElement>("plugin-add");
-  btn.disabled = true;
   status(`Fetching ${repo}${ref ? "@" + ref : ""}…`, "info");
   try {
     if (await store.get(name)) {
@@ -181,12 +272,26 @@ async function onAddGithub(): Promise<void> {
       return;
     }
     await store.add({ name, source: "github", repo, ref: resolvedRef, enabled: true, files, addedAt: Date.now() });
+    // Clear the manual install fields on success. (When invoked from the shelf
+    // these are typically empty; clearing them is harmless.)
     el<HTMLInputElement>("plugin-repo").value = "";
     el<HTMLInputElement>("plugin-ref").value = "";
     status(`Installed ${name} (${files.length} files) from ${repo}@${resolvedRef}. (reload your editor)`, "ok");
     await render();
   } catch (err) {
     status(`Install failed: ${fetchErrorMessage(err)}`, "err");
+  }
+}
+
+async function onAddGithub(): Promise<void> {
+  const repo = el<HTMLInputElement>("plugin-repo").value.trim();
+  // Blank ref -> fetchGithubPlugin resolves the repo's default branch (main vs
+  // master vs …), so the user doesn't have to know which a repo uses.
+  const ref = el<HTMLInputElement>("plugin-ref").value.trim();
+  const btn = el<HTMLButtonElement>("plugin-add");
+  btn.disabled = true;
+  try {
+    await installFromGithub(repo, ref);
   } finally {
     btn.disabled = false;
   }
