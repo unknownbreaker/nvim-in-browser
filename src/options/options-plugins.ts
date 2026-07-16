@@ -22,6 +22,10 @@ function el<T extends Element>(id: string): T {
 function status(message: string, kind: "ok" | "err" | "info"): void {
   document.dispatchEvent(new CustomEvent("nib-status", { detail: { message, kind } }));
 }
+// Nudge the nav badges + Overview pane to re-read after a store write.
+function refreshShell(): void {
+  document.dispatchEvent(new CustomEvent("nib-refresh"));
+}
 
 function fetchErrorMessage(err: unknown): string {
   if (err instanceof GithubFetchError) {
@@ -50,6 +54,8 @@ async function render(): Promise<void> {
     status(`Failed to list plugins: ${err instanceof Error ? err.message : String(err)}`, "err");
     return;
   }
+  // Keep the plugins count badge + Overview in sync after any (re-)render.
+  refreshShell();
   list.textContent = "";
   if (plugins.length === 0) {
     const empty = document.createElement("li");
@@ -113,6 +119,7 @@ async function onToggle(name: string, box: HTMLInputElement): Promise<void> {
   const enabled = box.checked;
   try {
     await store.setEnabled(name, enabled);
+    refreshShell();
     status(enabled ? `${name} enabled (reload your editor).` : `${name} disabled (reload your editor).`, "info");
   } catch (err) {
     box.checked = !enabled;
@@ -238,6 +245,7 @@ async function onSaveToken(): Promise<void> {
     await tokenStore.set(value);
     input.value = "";
     status("GitHub token saved.", "ok");
+    refreshShell();
     await refreshTokenStatus();
   } catch (err) {
     status(`Failed to save token: ${err instanceof Error ? err.message : String(err)}`, "err");
@@ -249,6 +257,7 @@ async function onClearToken(): Promise<void> {
     await tokenStore.clear();
     el<HTMLInputElement>("gh-token").value = "";
     status("GitHub token cleared.", "ok");
+    refreshShell();
     await refreshTokenStatus();
   } catch (err) {
     status(`Failed to clear token: ${err instanceof Error ? err.message : String(err)}`, "err");

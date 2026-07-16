@@ -2,6 +2,8 @@
 // UI modules. All feature logic lives in options-config.ts / options-plugins.ts.
 import { initConfigUI } from "./options-config";
 import { initPluginsUI } from "./options-plugins";
+import { initNav } from "./options-nav";
+import { initStatusUI } from "./options-status";
 
 const statusEl = document.getElementById("status") as HTMLDivElement | null;
 let statusTimer: ReturnType<typeof setTimeout> | undefined;
@@ -28,5 +30,7 @@ document.addEventListener("nib-status", (e) => {
   setStatus(d.message, d.kind, d.kind !== "err");
 });
 
+initNav();
 initConfigUI();
 initPluginsUI();
+initStatusUI();
