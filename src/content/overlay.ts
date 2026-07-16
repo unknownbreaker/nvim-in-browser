@@ -17,6 +17,18 @@ declare const __NVIM_TEST_HOOKS__: boolean;
 
 const ELIGIBLE_INPUT_TYPES = new Set(["text", "search", "url", "email", "tel"]);
 
+// Map the host page to a nvim filetype so syntax highlighting / treesitter
+// engage on sites whose text fields are known to hold a particular markup.
+// Exported so it can be unit-tested directly (the IIFE content bundle keeps it
+// internal — the symbol just isn't exposed on the global, which is fine).
+export function filetypeForHost(host: string): string | undefined {
+  const h = host.replace(/^www\./, "");
+  if (/(^|\.)(github|gitlab)\.com$/.test(h)) return "markdown";
+  if (/(^|\.)(stackoverflow|stackexchange|reddit)\.com$/.test(h)) return "markdown";
+  if (h === "news.ycombinator.com") return "markdown";
+  return undefined;
+}
+
 // How long we wait, after creating the engine-frame iframe, to hear back from
 // it (either "nvim-ready" once it boots, or a "nvim-text" sync) before giving
 // up and tearing the overlay down. Without this, an engine that hangs/crashes
@@ -196,7 +208,10 @@ function activate(): void {
   window.addEventListener("message", onMessage);
 
   const onLoad = (): void => {
-    frame.contentWindow?.postMessage({ type: "nvim-init", text: target.value }, "*");
+    frame.contentWindow?.postMessage(
+      { type: "nvim-init", text: target.value, filetype: filetypeForHost(location.hostname) },
+      "*",
+    );
     frame.contentWindow?.focus();
   };
   frame.addEventListener("load", onLoad);

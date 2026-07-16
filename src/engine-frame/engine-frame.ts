@@ -220,11 +220,17 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("focus", () => void syncClipboardIn());
 
-async function init(seedText: unknown): Promise<void> {
+async function init(seedText: unknown, filetype?: unknown): Promise<void> {
   await client.start(cols, rows);
   debug.ready = true;
   if (typeof seedText === "string" && seedText.length > 0) {
     await client.request("nvim_buf_set_lines", [0, 0, -1, false, seedText.split("\n")]);
+  }
+  // SECURITY: the filetype comes from the parent page via postMessage, so it is
+  // untrusted. Validate it against a strict allowlist charset before letting it
+  // anywhere near an Ex command — never interpolate raw text into `setlocal`.
+  if (typeof filetype === "string" && /^[a-z0-9._-]+$/.test(filetype)) {
+    await client.request("nvim_exec2", ["setlocal filetype=" + filetype, {}]);
   }
   await installBufferHooks();
   void syncClipboardIn();
@@ -235,7 +241,7 @@ async function init(seedText: unknown): Promise<void> {
 if (mode === "embed") {
   window.addEventListener("message", (ev) => {
     const m = ev.data;
-    if (m?.type === "nvim-init") void init(m.text);
+    if (m?.type === "nvim-init") void init(m.text, m.filetype);
   });
 } else {
   void startScratch();
