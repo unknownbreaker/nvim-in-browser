@@ -28,6 +28,38 @@ function syncSaveButton(): void {
   el<HTMLButtonElement>("save").disabled = el<HTMLTextAreaElement>("editor").value === savedValue;
 }
 
+// Debounced autosave: after a pause in typing, persist the current file so edits
+// aren't lost when switching files or closing the tab. The manual Save button
+// still works (immediate) and doubles as the unsaved-changes indicator.
+const AUTOSAVE_MS = 800;
+let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+async function flushAutosave(): Promise<void> {
+  clearTimeout(autosaveTimer);
+  autosaveTimer = undefined;
+  const value = el<HTMLTextAreaElement>("editor").value;
+  if (value === savedValue) return; // nothing changed since the last save
+  try {
+    await store.saveFile(current, value);
+    savedValue = value;
+    syncSaveButton();
+    status(`Autosaved ${current} ✓`, "ok");
+  } catch (err) {
+    status(`Autosave failed: ${describe(err)}`, "err");
+  }
+}
+
+function scheduleAutosave(): void {
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(() => void flushAutosave(), AUTOSAVE_MS);
+}
+
+// Save the file being left, then open another (used by the file-list clicks).
+async function switchTo(name: string): Promise<void> {
+  await flushAutosave();
+  await select(name);
+}
+
 async function refreshList(): Promise<void> {
   const list = el<HTMLUListElement>("config-list");
   let files: Record<string, string>;
@@ -49,13 +81,14 @@ async function refreshList(): Promise<void> {
     btn.style.textAlign = "left";
     btn.style.marginBottom = "4px";
     if (name === current) btn.className = "primary";
-    btn.addEventListener("click", () => void select(name));
+    btn.addEventListener("click", () => void switchTo(name));
     li.append(btn);
     list.append(li);
   }
 }
 
 async function select(name: string): Promise<void> {
+  clearTimeout(autosaveTimer); // cancel any pending save for the file we're leaving
   current = name;
   el<HTMLLabelElement>("config-editing-label").textContent = name;
   try {
@@ -70,6 +103,7 @@ async function select(name: string): Promise<void> {
 }
 
 async function onSave(): Promise<void> {
+  clearTimeout(autosaveTimer); // a manual save preempts the pending autosave
   el<HTMLButtonElement>("save").disabled = true;
   try {
     const value = el<HTMLTextAreaElement>("editor").value;
@@ -208,7 +242,15 @@ async function onToggleEnabled(box: HTMLInputElement): Promise<void> {
 }
 
 export function initConfigUI(): void {
-  el<HTMLTextAreaElement>("editor").addEventListener("input", syncSaveButton);
+  el<HTMLTextAreaElement>("editor").addEventListener("input", () => {
+    syncSaveButton();
+    scheduleAutosave();
+  });
+  // Don't lose a pending autosave when the tab is hidden or closed.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") void flushAutosave();
+  });
+  window.addEventListener("beforeunload", () => void flushAutosave());
   el<HTMLButtonElement>("save").addEventListener("click", () => void onSave());
   el<HTMLButtonElement>("config-add").addEventListener("click", () => void onAdd());
   el<HTMLButtonElement>("config-rename").addEventListener("click", () => void onRename());
