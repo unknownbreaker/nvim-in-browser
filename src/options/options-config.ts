@@ -20,6 +20,10 @@ function el<T extends Element>(id: string): T {
 function status(message: string, kind: "ok" | "err" | "info"): void {
   document.dispatchEvent(new CustomEvent("nib-status", { detail: { message, kind } }));
 }
+// Nudge the nav badges + Overview pane to re-read after a store write.
+function refreshShell(): void {
+  document.dispatchEvent(new CustomEvent("nib-refresh"));
+}
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -234,6 +238,7 @@ async function onToggleEnabled(box: HTMLInputElement): Promise<void> {
   const enabled = box.checked;
   try {
     await store.setMeta({ enabled });
+    refreshShell();
     status(enabled ? "Config + plugins will load on boot." : "Editors will boot clean.", "info");
   } catch (err) {
     box.checked = !enabled;

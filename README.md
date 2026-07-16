@@ -67,7 +67,7 @@ The extension boots real Neovim with **your** `init.lua`.
 - **Optional GitHub token:** unauthenticated GitHub API calls are limited to
   60/hr **per IP** (easily exhausted behind a shared/corporate/VPN address),
   which shows up as an install failure. Save a **personal access token** in the
-  Plugins section to raise that to 5,000/hr and to install from your **private**
+  Advanced section to raise that to 5,000/hr and to install from your **private**
   repos. A fine-grained, read-only token is enough (`Contents: read` only for
   the private repos you install). The token is kept in a **separate local
   database** — never written into your config or the editor, never included in a
