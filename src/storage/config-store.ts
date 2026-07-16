@@ -16,6 +16,8 @@ export interface ConfigMeta {
 export interface ConfigStore {
   loadFiles(): Promise<Record<string, string>>;
   saveFile(relpath: string, content: string): Promise<void>;
+  deleteFile(relpath: string): Promise<void>;
+  renameFile(from: string, to: string): Promise<void>;
   clear(): Promise<void>;
   getMeta(): Promise<ConfigMeta>;
   setMeta(meta: Partial<ConfigMeta>): Promise<void>;
@@ -84,6 +86,21 @@ export function openConfigStore(): ConfigStore {
       await tx<IDBValidKey>("readwrite", (s) =>
         s.put(content, FILE_PREFIX + relpath),
       );
+    },
+
+    async deleteFile(relpath) {
+      await tx<undefined>("readwrite", (s) => s.delete(FILE_PREFIX + relpath));
+    },
+
+    async renameFile(from, to) {
+      if (!isSafeRelpath(to)) throw new Error(`unsafe config relpath: ${to}`);
+      const content = await tx<unknown>("readonly", (s) =>
+        s.get(FILE_PREFIX + from),
+      );
+      if (typeof content !== "string")
+        throw new Error(`no such config file: ${from}`);
+      await tx<IDBValidKey>("readwrite", (s) => s.put(content, FILE_PREFIX + to));
+      await tx<undefined>("readwrite", (s) => s.delete(FILE_PREFIX + from));
     },
 
     async clear() {
