@@ -99,6 +99,11 @@ export function openConfigStore(): ConfigStore {
       );
       if (typeof content !== "string")
         throw new Error(`no such config file: ${from}`);
+      const existing = await tx<unknown>("readonly", (s) =>
+        s.get(FILE_PREFIX + to),
+      );
+      if (typeof existing === "string")
+        throw new Error(`target already exists: ${to}`);
       await tx<IDBValidKey>("readwrite", (s) => s.put(content, FILE_PREFIX + to));
       await tx<undefined>("readwrite", (s) => s.delete(FILE_PREFIX + from));
     },

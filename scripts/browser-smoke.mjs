@@ -155,6 +155,33 @@ function idbClearConfig(page) {
   );
 }
 
+// Cleanup: empty the v3 "plugins" store so an installed/disabled plugin can't
+// poison later phases, reruns, or a subsequent overlay-smoke.
+function idbClearPlugins(page) {
+  return page.evaluate(
+    () =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open("nvim-in-browser", 3);
+        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
+        open.onblocked = () => reject(new Error("open blocked"));
+        open.onsuccess = () => {
+          const db = open.result;
+          const tx = db.transaction("plugins", "readwrite");
+          const store = tx.objectStore("plugins");
+          store.clear();
+          tx.oncomplete = () => {
+            db.close();
+            resolve(true);
+          };
+          tx.onerror = () => {
+            db.close();
+            reject(new Error("clear tx error: " + (tx.error?.message ?? "?")));
+          };
+        };
+      }),
+  );
+}
+
 // Write a plugin record straight into the v3 "plugins" store (simulating the
 // options page having installed it). files: [{ path, text }] — text is encoded
 // to the Uint8Array the boot path expects.
@@ -855,6 +882,12 @@ async function run(exec, headless, id) {
       return { ok: false, reason: `multi-file config did not resolve lua/ require: tabstop is ${JSON.stringify(tabstopF)}, expected 5` };
     }
     console.log("[PHASE F3] ASSERT OK: lua/ require-module resolved (tabstop=5)");
+
+    // Cleanup: don't leave an enabled multi-file config or a plugin record in
+    // IndexedDB for reruns / a subsequent overlay-smoke to trip over.
+    await idbClearConfig(pageF3).catch((e) => console.log(`[PHASE F] cleanup warn: ${errText(e)}`));
+    await idbClearPlugins(pageF3).catch((e) => console.log(`[PHASE F] cleanup warn: ${errText(e)}`));
+    console.log("[PHASE F] cleaned up config + plugins");
     console.log("PHASE F: plugin enable/disable + multi-file config all pass");
 
     await browser.close();

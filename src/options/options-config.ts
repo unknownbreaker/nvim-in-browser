@@ -81,6 +81,13 @@ async function onAdd(): Promise<void> {
     return;
   }
   try {
+    const files = await store.loadFiles();
+    if (path in files) {
+      el<HTMLInputElement>("config-new").value = "";
+      status(`${path} already exists — select it to edit.`, "info");
+      await select(path);
+      return;
+    }
     await store.saveFile(path, "");
     el<HTMLInputElement>("config-new").value = "";
     await select(path);

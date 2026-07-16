@@ -37,6 +37,22 @@ describe("fetchGithubPlugin", () => {
     expect(new TextDecoder().decode(foo!.data)).toBe("vim.g.x = 1");
   });
 
+  it("skips tree blobs whose path is not a safe relpath", async () => {
+    const f = fakeFetch({
+      "api.github.com": () =>
+        treeJson([
+          { path: "plugin/ok.lua", type: "blob", size: 5 },
+          { path: "../evil.lua", type: "blob", size: 5 },
+        ]),
+      "raw.githubusercontent.com/o/r/main/plugin/ok.lua": () =>
+        new Response("vim.g.ok = 1", { status: 200 }),
+    });
+    const { files } = await fetchGithubPlugin("o/r", "main", f);
+    const paths = files.map((x) => x.path);
+    expect(paths).toContain("plugin/ok.lua");
+    expect(paths).not.toContain("../evil.lua");
+  });
+
   it("throws repo-not-found on a 404 tree", async () => {
     const f = fakeFetch({ "api.github.com": () => new Response("", { status: 404 }) });
     await expect(fetchGithubPlugin("o/r", "main", f)).rejects.toMatchObject({ kind: "repo-not-found" });

@@ -3,6 +3,8 @@
 // the file tree, raw.githubusercontent.com for blobs), so no host_permissions
 // are needed. fetchImpl is injectable for unit tests. Enforces file-count and
 // total-size caps so a giant repo can't be pulled into IndexedDB.
+import { isSafeRelpath } from "../storage/config-store";
+
 export type GithubFetchErrorKind =
   | "repo-not-found"
   | "rate-limited"
@@ -64,7 +66,9 @@ export async function fetchGithubPlugin(
   }
 
   const body = (await treeRes.json()) as { tree?: TreeEntry[] };
-  const blobs = (body.tree ?? []).filter((e) => e.type === "blob" && isAllowedPath(e.path));
+  const blobs = (body.tree ?? []).filter(
+    (e) => e.type === "blob" && isAllowedPath(e.path) && isSafeRelpath(e.path),
+  );
 
   if (blobs.length > MAX_FILES) {
     throw new GithubFetchError("too-large", `plugin has ${blobs.length} files (max ${MAX_FILES})`);
