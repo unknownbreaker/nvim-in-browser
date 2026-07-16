@@ -29,6 +29,9 @@ export class NvimClient {
     workerUrl: string,
     private readonly wasmUrl: string,
     private readonly runtimeUrl: string,
+    // Keys the worker's compiled-module cache (the extension version). Optional
+    // so non-extension callers can omit it (caching is then disabled).
+    private readonly cacheKey?: string,
   ) {
     this.worker = new Worker(workerUrl, { type: "module" });
     this.rpc = new NvimRpc((bytes) => {
@@ -87,6 +90,7 @@ export class NvimClient {
         runtimeUrl: this.runtimeUrl,
         argv: opts?.argv,
         configFiles: opts?.configFiles,
+        cacheKey: this.cacheKey,
       });
     });
   }

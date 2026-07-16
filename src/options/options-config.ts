@@ -7,6 +7,10 @@ import { readFolderUpload } from "./folder-upload";
 
 const store = openConfigStore();
 let current = "init.lua"; // relpath being edited
+// The current file's on-disk content. Save is enabled only when the editor
+// differs from this; right after a save it matches, so Save disables again —
+// which (with the status line) is the confirmation that the save landed.
+let savedValue = "";
 
 function el<T extends Element>(id: string): T {
   const node = document.getElementById(id);
@@ -18,6 +22,10 @@ function status(message: string, kind: "ok" | "err" | "info"): void {
 }
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+// Enable Save only when the editor has unsaved changes.
+function syncSaveButton(): void {
+  el<HTMLButtonElement>("save").disabled = el<HTMLTextAreaElement>("editor").value === savedValue;
 }
 
 async function refreshList(): Promise<void> {
@@ -53,6 +61,8 @@ async function select(name: string): Promise<void> {
   try {
     const files = await store.loadFiles();
     el<HTMLTextAreaElement>("editor").value = files[name] ?? "";
+    savedValue = el<HTMLTextAreaElement>("editor").value;
+    syncSaveButton();
   } catch (err) {
     status(`Failed to open ${name}: ${describe(err)}`, "err");
   }
@@ -60,16 +70,19 @@ async function select(name: string): Promise<void> {
 }
 
 async function onSave(): Promise<void> {
-  const btn = el<HTMLButtonElement>("save");
-  btn.disabled = true;
+  el<HTMLButtonElement>("save").disabled = true;
   try {
-    await store.saveFile(current, el<HTMLTextAreaElement>("editor").value);
+    const value = el<HTMLTextAreaElement>("editor").value;
+    await store.saveFile(current, value);
+    savedValue = value;
     status(`Saved ${current} ✓ (reload your editor tab to apply)`, "ok");
     await refreshList();
   } catch (err) {
     status(`Save failed: ${describe(err)}`, "err");
   } finally {
-    btn.disabled = false;
+    // Success: matches savedValue -> stays disabled (the "saved" signal).
+    // Failure: still dirty -> re-enabled so the user can retry.
+    syncSaveButton();
   }
 }
 
@@ -155,9 +168,14 @@ async function onFetch(): Promise<void> {
   try {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    const text = await res.text();
+    const files = await store.loadFiles();
     current = "init.lua";
     el<HTMLLabelElement>("config-editing-label").textContent = "init.lua";
-    el<HTMLTextAreaElement>("editor").value = await res.text();
+    savedValue = files["init.lua"] ?? "";
+    el<HTMLTextAreaElement>("editor").value = text;
+    syncSaveButton(); // fetched text differs from saved -> Save enabled
+    await refreshList();
     status("Fetched ✓ into init.lua — review, then Save.", "ok");
   } catch (err) {
     status(`Fetch failed: ${describe(err)} — some hosts block cross-origin fetch; raw GitHub / gists usually work.`, "err");
@@ -190,6 +208,7 @@ async function onToggleEnabled(box: HTMLInputElement): Promise<void> {
 }
 
 export function initConfigUI(): void {
+  el<HTMLTextAreaElement>("editor").addEventListener("input", syncSaveButton);
   el<HTMLButtonElement>("save").addEventListener("click", () => void onSave());
   el<HTMLButtonElement>("config-add").addEventListener("click", () => void onAdd());
   el<HTMLButtonElement>("config-rename").addEventListener("click", () => void onRename());

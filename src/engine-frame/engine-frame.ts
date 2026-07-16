@@ -31,6 +31,9 @@ function makeClient(): NvimClient {
     chrome.runtime.getURL("engine-worker.js"),
     chrome.runtime.getURL("nvim-asyncify.wasm"),
     chrome.runtime.getURL("nvim-runtime.tar.gz"),
+    // Keys the worker's compiled-module cache so later boots skip the ~11 MB
+    // recompile. The version bumps on every release (new engine), invalidating it.
+    chrome.runtime.getManifest().version,
   );
 }
 // Reassignable: bootWithSafeMode swaps in a fresh client on config-boot failure.
@@ -562,8 +565,21 @@ async function bootScratchInstance(store: ScratchStore): Promise<void> {
   ime.focus();
 }
 
+// Each scratch TAB is opened with a distinct `?doc=<id>` on scratch.html so its
+// draft is independent. engine-frame is scratch.html's same-origin child (full
+// mode), so read the id from the parent. Empty → the shared default draft (e.g.
+// scratch.html opened directly, or the browser smoke). Guarded because in embed
+// mode the parent is a cross-origin host page.
+function scratchDocId(): string {
+  try {
+    return new URLSearchParams(window.parent.location.search).get("doc") ?? "";
+  } catch {
+    return "";
+  }
+}
+
 async function startScratch(): Promise<void> {
-  const store = openScratchStore();
+  const store = openScratchStore(scratchDocId());
   await bootScratchInstance(store);
   // Best-effort flush when the tab is hidden or closing. Registered once; it
   // reads the live module `client`, so it survives idle respawns transparently.
