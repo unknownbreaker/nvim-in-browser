@@ -49,6 +49,18 @@ const SAFE_MODE_TIMEOUT_MS = 90_000;
 const IDLE_MS = 12_000;
 const IDLE_GATE = 5; // last idle stat sample must be <= this many wakeups/sec
 
+// Performance budgets (Phase B). These are DELIBERATELY GENEROUS headless-CI
+// ceilings, NOT the real numbers — a warm local/desktop run is far under them.
+// They exist to catch gross regressions (a boot that suddenly doubles, an RPC
+// path that stalls), not to measure true performance.
+//   BOOT_BUDGET_MS: cold boot, first-load compile of the ~11MB wasm INCLUDED.
+//     Real cold boot is ~1-2s; headless CI slack pushes the ceiling to 6s.
+//   LATENCY_BUDGET_MS: p95 of a minimal RPC round-trip. Real is ~3ms; headless
+//     scheduling jitter justifies the 75ms ceiling.
+const BOOT_BUDGET_MS = 6_000;
+const LATENCY_BUDGET_MS = 75;
+const LATENCY_SAMPLES = 40; // RPC round-trips driven for the latency gate
+
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function fail(msg) {
@@ -279,6 +291,11 @@ async function run(exec, headless, id) {
       console.log(`  [reqfailed] ${r.url()} ${r.failure()?.errorText ?? ""}`),
     );
 
+    // Time the cold boot: from just before the initial scratch load through to
+    // __nvim.ready. This IS the perf boot-time gate's measurement (Phase B) — a
+    // real page load that compiles the ~11MB wasm from scratch, so no separate
+    // load is added just to time one.
+    const bootStart = Date.now();
     await page.goto(`chrome-extension://${id}/scratch.html`, { waitUntil: "domcontentloaded" });
 
     // The engine + __nvim hook live inside the engine-frame iframe.
@@ -293,6 +310,15 @@ async function run(exec, headless, id) {
       polling: 250,
     });
     console.log(`engine ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
+    // ---- PERF GATE 1: boot-time budget (cold, wasm-compile-inclusive) -------
+    const bootMs = Date.now() - bootStart;
+    console.log(`PERF: boot ${bootMs}ms (budget ${BOOT_BUDGET_MS})`);
+    if (bootMs >= BOOT_BUDGET_MS) {
+      await browser.close();
+      return { ok: false, reason: `boot ${bootMs}ms exceeds budget ${BOOT_BUDGET_MS}ms (cold, ~11MB wasm compile included)` };
+    }
+    console.log("PERF: ASSERT OK: cold boot under budget");
 
     // Drive input through the debug hook (rpcnotify path; no real focus needed).
     await frame.evaluate(() => window.__nvim.input("ihello world"));
@@ -328,6 +354,30 @@ async function run(exec, headless, id) {
       await browser.close();
       return { ok: false, reason: `idle wakeups ${lastIdle}/s exceeds gate ${IDLE_GATE}/s` };
     }
+
+    // ---- PERF GATE 2: input-latency budget (RPC round-trip proxy) ----------
+    // Drive LATENCY_SAMPLES minimal RPC round-trips against the now-idle engine
+    // and gate p95. nvim_eval("1") is the cheapest request that still exercises
+    // the full page -> worker -> nvim -> back path, so it stands in for input
+    // responsiveness. Each round-trip is timed host-side (Date.now bracketing
+    // the awaited evaluate) so the number reflects real end-to-end latency.
+    console.log(`\n[PERF] input latency: driving ${LATENCY_SAMPLES} RPC round-trips (nvim_eval)...`);
+    const latencies = [];
+    for (let i = 0; i < LATENCY_SAMPLES; i++) {
+      const t0 = Date.now();
+      await frame.evaluate(() => window.__nvim.request("nvim_eval", ["1"]));
+      latencies.push(Date.now() - t0);
+    }
+    const sorted = [...latencies].sort((a, b) => a - b);
+    const pct = (p) => sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
+    const p50 = pct(50);
+    const p95 = pct(95);
+    console.log(`PERF: latency p50=${p50}ms p95=${p95}ms (budget ${LATENCY_BUDGET_MS})`);
+    if (p95 >= LATENCY_BUDGET_MS) {
+      await browser.close();
+      return { ok: false, reason: `input latency p95 ${p95}ms exceeds budget ${LATENCY_BUDGET_MS}ms (samples: ${JSON.stringify(latencies)})` };
+    }
+    console.log("PERF: ASSERT OK: input latency p95 under budget");
 
     // ---- PHASE A: persistence across reload (IndexedDB round-trip) ----------
     // Type a draft, wait past the 400ms save debounce, then reload the SAME page
@@ -524,6 +574,9 @@ async function run(exec, headless, id) {
       lastIdle,
       wakeupLog,
       idleSamples,
+      bootMs,
+      latencyP50: p50,
+      latencyP95: p95,
       persisted: true,
       clipboard,
       configLoaded: true,
@@ -567,12 +620,15 @@ async function main() {
   if (!result.ok) fail(result.reason);
 
   console.log(`\nlast idle wakeups/sec: ${result.lastIdle} (gate <= ${IDLE_GATE})`);
+  console.log(`PERF boot: ${result.bootMs}ms (budget ${BOOT_BUDGET_MS})`);
+  console.log(`PERF latency: p50=${result.latencyP50}ms p95=${result.latencyP95}ms (budget ${LATENCY_BUDGET_MS})`);
   console.log(`persistence across reload: ${result.persisted ? "PASS" : "FAIL"}`);
   console.log(`clipboard copy: ${result.clipboard}`);
   console.log(`config loads (PHASE C): ${result.configLoaded ? "PASS" : "FAIL"}`);
   console.log(`safe mode recovers (PHASE D): ${result.safeModeRecovered ? "PASS" : "FAIL"}`);
   console.log(
-    "\nPASS: engine booted in-browser, buffer round-tripped, idle CPU parked, " +
+    `\nPASS: engine booted in-browser (boot ${result.bootMs}ms, latency p95 ${result.latencyP95}ms), ` +
+      "buffer round-tripped, idle CPU parked, " +
       "draft persisted across reload" +
       (result.clipboard.startsWith("verified") ? ", clipboard copy verified" : " (clipboard soft-skipped)") +
       ", config loaded from IndexedDB (tabstop=7), safe mode recovered a broken config",
