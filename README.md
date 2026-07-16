@@ -18,10 +18,23 @@ Design: [docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md](docs/super
    to the focused document), so a paste reflects the clipboard as of the last
    focus/visibility sync, not always the instant of the paste.
 4. **Overlay:** focus any `<textarea>` or text-like `<input>` and press
-   `Ctrl+Shift+E`. Edits sync back live (debounced); `:q` or the escape chord
-   `Ctrl+Shift+Esc` closes the overlay (the chord always works, even if your
-   config wedges the editor).
-   Password fields are never touched.
+   `Ctrl+Shift+E`. Edits sync back live (debounced), so **your text is written
+   into the underlying web page's field automatically as you type** — that is
+   the only "save," and it's continuous.
+   - **Closing:** use **`:q!`**, or the escape chord `Ctrl+Shift+Esc` (the chord
+     always works, even if your config wedges the editor). Plain `:q` is
+     *rejected* — the buffer is always "modified", so Neovim refuses to quit
+     with `E37: No write since last change`. `:q!` force-quits; you lose
+     nothing because your edits are already in the page field (and the final
+     text is synced once more on quit). If you have no physical Escape key,
+     `:q!` is your close command.
+   - **`:w` does NOT save to any file.** The overlay buffer is unnamed, so
+     `:w` alone fails (`E32: No file name`) and `:w somename` writes only into
+     the engine's **in-memory virtual filesystem, which is discarded when the
+     overlay closes** — it never touches your disk and is not how your text is
+     persisted. There is no reason to `:w`; the automatic sync to the page
+     field is the real save. (The escape chord is not yet reassignable.)
+   - Password fields are never touched.
    IME/composition input works: compose CJK or accented text with your system
    IME and the finished text lands in the buffer. On known sites the overlay
    sets a filetype for syntax highlighting (GitHub / GitLab / Stack Overflow /
