@@ -316,11 +316,14 @@ Layered, TDD throughout:
    (`scripts/browser-smoke.mjs` PHASE C config-loads: `tabstop=7` read back
    after a reload; PHASE D safe-mode: hanging config → engine still boots,
    `safeMode` true, default option preserved).
-   **Deferred follow-up:** the plugin fetcher (staging pure-Lua plugins onto
-   `packpath`) and multi-file / folder config upload — the options editor is a
-   single-`init.lua` textarea + URL fetch for now. Process/network plugins and
-   plugin managers remain out of scope (WASM sandbox: no subprocess, no host
-   network from Lua).
+   **Follow-up ✅ Delivered 2026-07-16** — the plugin fetcher (staging pure-Lua
+   plugins onto `packpath`) and the multi-file / folder config manager shipped.
+   Users install pure-Lua/Vimscript plugins by GitHub `owner/repo` (no extra
+   permissions) or a folder upload, toggle each plugin on/off, and edit a
+   multi-file config; the master "Load my config" switch gates both config and
+   plugins. Process/network plugins and plugin managers remain out of scope
+   (WASM sandbox: no subprocess, no host network from Lua). See
+   [docs/superpowers/specs/2026-07-16-plugin-fetcher-config-manager-design.md](2026-07-16-plugin-fetcher-config-manager-design.md).
 5. **Hardening:** resource lifecycle, watchdog, safe mode, fidelity suite
    expansion, performance gates.
    ✅ **Done 2026-07-16** — the robustness layer landed across both repos:

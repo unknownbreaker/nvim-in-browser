@@ -1,14 +1,14 @@
 // Shared IndexedDB opener for the "nvim-in-browser" database. Bumped to version
-// 2 to add the "config" store alongside the M2 "docs" (scratch) store. The
-// onupgradeneeded handler creates each store only if absent, so an existing v1
-// database (with just "docs" and its data) upgrades cleanly to add "config"
-// without touching the scratch data. The IndexedDB round-trip is exercised by
+// 3 to add the "plugins" store alongside the "config" and M2 "docs" (scratch)
+// stores. The onupgradeneeded handler creates each store only if absent, so an
+// existing v2 database upgrades cleanly by adding just "plugins" without
+// touching the "docs" or "config" data. The IndexedDB round-trip is exercised by
 // scripts/browser-smoke.mjs; only the pure serializeError helper is unit-tested
 // (vitest's node env has no IndexedDB).
 
 const DB_NAME = "nvim-in-browser";
-const DB_VERSION = 2;
-const STORES = ["docs", "config"] as const;
+const DB_VERSION = 3;
+const STORES = ["docs", "config", "plugins"] as const;
 
 export function serializeError(e: unknown): string {
   if (e instanceof Error) return e.message;

@@ -88,16 +88,16 @@ function errText(e) {
 
 // ---- config-store IndexedDB helpers (PHASE C/D) --------------------------
 // The config store lives in the SAME origin DB the app uses: name
-// "nvim-in-browser", version 2, object store "config", file records keyed
+// "nvim-in-browser", version 3, object store "config", file records keyed
 // "file:"+relpath and a single "meta" = {enabled}. We drive it directly from
 // the page context to simulate the options page having saved a config. The
-// app already created the stores, so we open at version 2 (never lower — a
-// lower version would abort with VersionError).
+// app already created the stores, so we open at version 3 (never lower — a
+// lower version would abort with VersionError; Task 1 bumped the app DB to 3).
 function idbWriteConfig(page, initLua, enabled) {
   return page.evaluate(
     ({ initLua, enabled }) =>
       new Promise((resolve, reject) => {
-        const open = indexedDB.open("nvim-in-browser", 2);
+        const open = indexedDB.open("nvim-in-browser", 3);
         open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
         open.onblocked = () => reject(new Error("open blocked"));
         open.onsuccess = () => {
@@ -133,7 +133,7 @@ function idbClearConfig(page) {
   return page.evaluate(
     () =>
       new Promise((resolve, reject) => {
-        const open = indexedDB.open("nvim-in-browser", 2);
+        const open = indexedDB.open("nvim-in-browser", 3);
         open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
         open.onblocked = () => reject(new Error("open blocked"));
         open.onsuccess = () => {
@@ -152,6 +152,132 @@ function idbClearConfig(page) {
           };
         };
       }),
+  );
+}
+
+// Cleanup: empty the v3 "plugins" store so an installed/disabled plugin can't
+// poison later phases, reruns, or a subsequent overlay-smoke.
+function idbClearPlugins(page) {
+  return page.evaluate(
+    () =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open("nvim-in-browser", 3);
+        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
+        open.onblocked = () => reject(new Error("open blocked"));
+        open.onsuccess = () => {
+          const db = open.result;
+          const tx = db.transaction("plugins", "readwrite");
+          const store = tx.objectStore("plugins");
+          store.clear();
+          tx.oncomplete = () => {
+            db.close();
+            resolve(true);
+          };
+          tx.onerror = () => {
+            db.close();
+            reject(new Error("clear tx error: " + (tx.error?.message ?? "?")));
+          };
+        };
+      }),
+  );
+}
+
+// Write a plugin record straight into the v3 "plugins" store (simulating the
+// options page having installed it). files: [{ path, text }] — text is encoded
+// to the Uint8Array the boot path expects.
+function idbWritePlugin(page, record) {
+  return page.evaluate(
+    (rec) =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open("nvim-in-browser", 3);
+        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
+        open.onblocked = () => reject(new Error("open blocked"));
+        open.onsuccess = () => {
+          const db = open.result;
+          const tx = db.transaction("plugins", "readwrite");
+          const store = tx.objectStore("plugins");
+          const enc = new TextEncoder();
+          store.put(
+            {
+              name: rec.name,
+              source: "upload",
+              enabled: rec.enabled,
+              addedAt: 0,
+              files: rec.files.map((f) => ({ path: f.path, data: enc.encode(f.text) })),
+            },
+            rec.name,
+          );
+          tx.oncomplete = () => {
+            db.close();
+            resolve(true);
+          };
+          tx.onerror = () => {
+            db.close();
+            reject(new Error("tx error: " + (tx.error?.message ?? "?")));
+          };
+        };
+      }),
+    record,
+  );
+}
+
+// Flip an installed plugin's enabled flag in place.
+function idbSetPluginEnabled(page, name, enabled) {
+  return page.evaluate(
+    ({ name, enabled }) =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open("nvim-in-browser", 3);
+        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
+        open.onsuccess = () => {
+          const db = open.result;
+          const tx = db.transaction("plugins", "readwrite");
+          const store = tx.objectStore("plugins");
+          const get = store.get(name);
+          get.onsuccess = () => {
+            const rec = get.result;
+            rec.enabled = enabled;
+            store.put(rec, name);
+          };
+          tx.oncomplete = () => {
+            db.close();
+            resolve(true);
+          };
+          tx.onerror = () => {
+            db.close();
+            reject(new Error("tx error: " + (tx.error?.message ?? "?")));
+          };
+        };
+      }),
+    { name, enabled },
+  );
+}
+
+// Write several config files at once (init.lua + lua/ modules), plus meta.
+function idbWriteConfigFiles(page, filesObj, enabled) {
+  return page.evaluate(
+    ({ filesObj, enabled }) =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open("nvim-in-browser", 3);
+        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
+        open.onsuccess = () => {
+          const db = open.result;
+          const tx = db.transaction("config", "readwrite");
+          const store = tx.objectStore("config");
+          for (const [relpath, content] of Object.entries(filesObj)) {
+            store.put(content, "file:" + relpath);
+          }
+          store.put({ enabled }, "meta");
+          tx.oncomplete = () => {
+            db.close();
+            resolve(true);
+          };
+          tx.onerror = () => {
+            db.close();
+            reject(new Error("tx error: " + (tx.error?.message ?? "?")));
+          };
+        };
+      }),
+    { filesObj, enabled },
   );
 }
 
@@ -699,6 +825,71 @@ async function run(exec, headless, id) {
     console.log("[PHASE E] ASSERT OK: draft restored after idle teardown + respawn");
     console.log("PHASE E: idle teardown -> respawn -> restore");
 
+    // ---- PHASE F: plugin enable/disable + multi-file config ----------------
+    // F1: a tiny pure-Lua plugin sets a global from plugin/marker.lua. With it
+    // enabled, a fresh boot must auto-source it (g:nib_plugin_marker == 1);
+    // disabled, a fresh boot must NOT (== 0). Proves pack/plugins/start auto-load
+    // AND that the per-plugin enable flag gates the FS write.
+    console.log("\n[PHASE F] plugin: installing an enabled marker plugin...");
+    // Clear any config left by earlier phases so this boots on plugins alone,
+    // and set config meta enabled=true (the master switch) with no init.lua.
+    await idbClearConfig(page);
+    await idbWriteConfigFiles(page, {}, true);
+    await idbWritePlugin(page, {
+      name: "markertest",
+      enabled: true,
+      files: [{ path: "plugin/marker.lua", text: "vim.g.nib_plugin_marker = 1" }],
+    });
+    const { page: pageF1, frame: frameF1 } = await openScratchReady(browser, id, "PHASE F1", BOOT_TIMEOUT_MS);
+    const markerOn = await frameF1.evaluate(() =>
+      window.__nvim.request("nvim_eval", ["get(g:, 'nib_plugin_marker', 0)"]),
+    );
+    console.log(`[PHASE F1] g:nib_plugin_marker -> ${JSON.stringify(markerOn)}`);
+    if (markerOn !== 1) {
+      await browser.close();
+      return { ok: false, reason: `enabled plugin did not load: marker is ${JSON.stringify(markerOn)}, expected 1` };
+    }
+    console.log("[PHASE F1] ASSERT OK: enabled plugin auto-loaded");
+
+    console.log("[PHASE F] plugin: disabling the marker plugin, rebooting...");
+    await idbSetPluginEnabled(pageF1, "markertest", false);
+    const { page: pageF2, frame: frameF2 } = await openScratchReady(browser, id, "PHASE F2", BOOT_TIMEOUT_MS);
+    const markerOff = await frameF2.evaluate(() =>
+      window.__nvim.request("nvim_eval", ["get(g:, 'nib_plugin_marker', 0)"]),
+    );
+    console.log(`[PHASE F2] g:nib_plugin_marker -> ${JSON.stringify(markerOff)}`);
+    if (markerOff !== 0) {
+      await browser.close();
+      return { ok: false, reason: `disabled plugin still loaded: marker is ${JSON.stringify(markerOff)}, expected 0` };
+    }
+    console.log("[PHASE F2] ASSERT OK: disabled plugin did not load");
+
+    // F3: multi-file config — init.lua requires a lua/ module that sets tabstop.
+    // Proves the lua/ require path resolves in the WASI FS layout.
+    console.log("[PHASE F] config: multi-file init.lua + lua/nibcfg.lua (tabstop=5)...");
+    await idbWritePlugin(pageF2, { name: "markertest", enabled: false, files: [{ path: "plugin/marker.lua", text: "vim.g.nib_plugin_marker = 1" }] });
+    await idbWriteConfigFiles(pageF2, {
+      "init.lua": "require('nibcfg').apply()",
+      "lua/nibcfg.lua": "return { apply = function() vim.o.tabstop = 5 end }",
+    }, true);
+    const { page: pageF3, frame: frameF3 } = await openScratchReady(browser, id, "PHASE F3", BOOT_TIMEOUT_MS);
+    const tabstopF = await frameF3.evaluate(() =>
+      window.__nvim.request("nvim_get_option_value", ["tabstop", {}]),
+    );
+    console.log(`[PHASE F3] tabstop -> ${JSON.stringify(tabstopF)}`);
+    if (tabstopF !== 5) {
+      await browser.close();
+      return { ok: false, reason: `multi-file config did not resolve lua/ require: tabstop is ${JSON.stringify(tabstopF)}, expected 5` };
+    }
+    console.log("[PHASE F3] ASSERT OK: lua/ require-module resolved (tabstop=5)");
+
+    // Cleanup: don't leave an enabled multi-file config or a plugin record in
+    // IndexedDB for reruns / a subsequent overlay-smoke to trip over.
+    await idbClearConfig(pageF3).catch((e) => console.log(`[PHASE F] cleanup warn: ${errText(e)}`));
+    await idbClearPlugins(pageF3).catch((e) => console.log(`[PHASE F] cleanup warn: ${errText(e)}`));
+    console.log("[PHASE F] cleaned up config + plugins");
+    console.log("PHASE F: plugin enable/disable + multi-file config all pass");
+
     await browser.close();
     return {
       ok: true,
@@ -759,6 +950,7 @@ async function main() {
   console.log(`config loads (PHASE C): ${result.configLoaded ? "PASS" : "FAIL"}`);
   console.log(`safe mode recovers (PHASE D): ${result.safeModeRecovered ? "PASS" : "FAIL"}`);
   console.log(`idle teardown -> respawn -> restore (PHASE E): ${result.idleTeardown ? "PASS" : "FAIL"}`);
+    console.log("plugin enable/disable + multi-file config (PHASE F): PASS");
   console.log(
     `\nPASS: engine booted in-browser (boot ${result.bootMs}ms, latency p95 ${result.latencyP95}ms), ` +
       "buffer round-tripped, idle CPU parked, " +

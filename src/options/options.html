@@ -201,44 +201,73 @@
   <body>
     <main>
       <h1><span class="brand">nvim-in-browser</span> — Configuration</h1>
-      <p class="tagline">Edit your <code>init.lua</code> — it runs in a WASM sandbox.</p>
+      <p class="tagline">Edit your multi-file Neovim config and install pure-Lua plugins — it all runs in a WASM sandbox.</p>
 
       <div class="note">
         <strong>This runs in a browser sandbox.</strong> Pure-Lua/Vimscript
         config, keymaps, options, and pure-Lua plugins work. Config that spawns
         processes or uses the network (LSP servers, git, telescope+ripgrep,
-        plugin managers that clone repos) will <strong>NOT</strong> work. Plugin
-        loading (bundling pure-Lua plugins) is coming in a follow-up.
+        plugin managers that clone repos) will <strong>NOT</strong> work.
+        Multi-file config editing and pure-Lua plugins install below.
       </div>
 
-      <section>
-        <label class="field-label" for="editor">init.lua</label>
-        <textarea
-          id="editor"
-          spellcheck="false"
-          autocapitalize="off"
-          autocomplete="off"
-          aria-label="init.lua contents"
-        ></textarea>
+      <section id="config-section">
+        <label class="field-label">Config files (<code>~/.config/nvim</code>)</label>
         <div class="row">
-          <button id="save" class="primary" type="button">Save</button>
-          <button id="clear" class="danger" type="button">Clear config</button>
+          <input id="config-new" type="url" placeholder="new file path (e.g. lua/opts.lua)" style="flex: 2 1 220px" />
+          <button id="config-add" type="button">New file</button>
+          <input id="config-folder" type="file" webkitdirectory aria-label="Import a config folder" />
+          <input id="fetch-url" type="url" placeholder="https://…/init.lua" style="flex: 1 1 200px" />
+          <button id="fetch" type="button">Fetch to init.lua</button>
+          <button id="clear" class="danger" type="button">Clear all</button>
+        </div>
+        <div class="row" style="align-items: stretch">
+          <ul id="config-list" style="list-style: none; padding: 0; margin: 0; flex: 1 1 180px; min-width: 160px"></ul>
+          <div style="flex: 3 1 360px; min-width: 0">
+            <label class="field-label" id="config-editing-label" for="editor">init.lua</label>
+            <textarea id="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="config file contents"></textarea>
+            <div class="row">
+              <button id="save" class="primary" type="button">Save file</button>
+              <button id="config-rename" type="button">Rename</button>
+              <button id="config-delete" class="danger" type="button">Delete file</button>
+            </div>
+          </div>
         </div>
       </section>
 
       <hr />
 
-      <section>
-        <label class="field-label" for="fetch-url">Fetch from URL</label>
+      <section id="plugins-section">
+        <label class="field-label">Plugins (pure-Lua / Vimscript only)</label>
+        <div class="note" style="border-left-color: var(--accent); margin-bottom: 12px">
+          Installs into <code>pack/plugins/start</code> and auto-loads on boot.
+          Plugins that spawn processes or use the network (LSP, Telescope+ripgrep,
+          Treesitter parsers, Mason, plugin managers) will <strong>not</strong> work.
+        </div>
         <div class="row">
           <input
-            id="fetch-url"
+            id="plugin-repo"
             type="url"
-            placeholder="https://…/init.lua"
-            aria-label="URL to fetch init.lua from"
+            placeholder="owner/repo  (e.g. echasnovski/mini.nvim)"
+            aria-label="GitHub owner/repo to install"
+            style="flex: 2 1 260px"
           />
-          <button id="fetch" type="button">Fetch</button>
+          <input
+            id="plugin-ref"
+            type="url"
+            placeholder="ref (default: main)"
+            aria-label="git ref"
+            style="flex: 1 1 120px"
+          />
+          <button id="plugin-add" class="primary" type="button">Add from GitHub</button>
         </div>
+        <div class="row">
+          <input id="plugin-folder" type="file" webkitdirectory aria-label="Upload a plugin folder" />
+          <span class="hint" style="color: var(--subtext); font-size: 0.8rem"
+            >…or upload a plugin folder from disk</span
+          >
+        </div>
+        <ul id="plugin-list" style="list-style: none; padding: 0; margin: 16px 0 0"></ul>
       </section>
 
       <hr />
@@ -249,8 +278,8 @@
           <label for="enabled">
             Load my config on boot (uncheck to boot clean)
             <span class="hint"
-              >When unchecked, editors boot with a stock Neovim and ignore your
-              saved config.</span
+              >When unchecked, editors boot fully clean with a stock Neovim,
+              ignoring both your saved config and all installed plugins.</span
             >
           </label>
         </div>
