@@ -73,7 +73,16 @@ function renderRow(p: PluginRecord): HTMLLIElement {
   const label = document.createElement("label");
   label.style.flex = "1 1 auto";
   const src = p.source === "github" ? `github: ${p.repo}@${p.ref}` : "uploaded";
-  label.innerHTML = `<strong>${p.name}</strong> <span class="hint" style="color:var(--subtext)">${src} · ${p.files.length} files</span>`;
+  // Build with textContent, not innerHTML: p.repo/p.ref are user-supplied, so
+  // interpolating them into markup would be an injection vector (self-XSS on a
+  // tampered IndexedDB record).
+  const nameEl = document.createElement("strong");
+  nameEl.textContent = p.name;
+  const meta = document.createElement("span");
+  meta.className = "hint";
+  meta.style.color = "var(--subtext)";
+  meta.textContent = ` ${src} · ${p.files.length} files`;
+  label.append(nameEl, meta);
 
   const actions = document.createElement("div");
   actions.className = "row";
