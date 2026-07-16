@@ -201,43 +201,37 @@
   <body>
     <main>
       <h1><span class="brand">nvim-in-browser</span> — Configuration</h1>
-      <p class="tagline">Edit your <code>init.lua</code> — it runs in a WASM sandbox.</p>
+      <p class="tagline">Edit your multi-file Neovim config and install pure-Lua plugins — it all runs in a WASM sandbox.</p>
 
       <div class="note">
         <strong>This runs in a browser sandbox.</strong> Pure-Lua/Vimscript
         config, keymaps, options, and pure-Lua plugins work. Config that spawns
         processes or uses the network (LSP servers, git, telescope+ripgrep,
-        plugin managers that clone repos) will <strong>NOT</strong> work. Plugin
-        loading (bundling pure-Lua plugins) is coming in a follow-up.
+        plugin managers that clone repos) will <strong>NOT</strong> work.
+        Multi-file config editing and pure-Lua plugins install below.
       </div>
 
-      <section>
-        <label class="field-label" for="editor">init.lua</label>
-        <textarea
-          id="editor"
-          spellcheck="false"
-          autocapitalize="off"
-          autocomplete="off"
-          aria-label="init.lua contents"
-        ></textarea>
+      <section id="config-section">
+        <label class="field-label">Config files (<code>~/.config/nvim</code>)</label>
         <div class="row">
-          <button id="save" class="primary" type="button">Save</button>
-          <button id="clear" class="danger" type="button">Clear config</button>
+          <input id="config-new" type="url" placeholder="new file path (e.g. lua/opts.lua)" style="flex: 2 1 220px" />
+          <button id="config-add" type="button">New file</button>
+          <input id="config-folder" type="file" webkitdirectory aria-label="Import a config folder" />
+          <input id="fetch-url" type="url" placeholder="https://…/init.lua" style="flex: 1 1 200px" />
+          <button id="fetch" type="button">Fetch to init.lua</button>
+          <button id="clear" class="danger" type="button">Clear all</button>
         </div>
-      </section>
-
-      <hr />
-
-      <section>
-        <label class="field-label" for="fetch-url">Fetch from URL</label>
-        <div class="row">
-          <input
-            id="fetch-url"
-            type="url"
-            placeholder="https://…/init.lua"
-            aria-label="URL to fetch init.lua from"
-          />
-          <button id="fetch" type="button">Fetch</button>
+        <div class="row" style="align-items: stretch">
+          <ul id="config-list" style="list-style: none; padding: 0; margin: 0; flex: 1 1 180px; min-width: 160px"></ul>
+          <div style="flex: 3 1 360px; min-width: 0">
+            <label class="field-label" id="config-editing-label" for="editor">init.lua</label>
+            <textarea id="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="config file contents"></textarea>
+            <div class="row">
+              <button id="save" class="primary" type="button">Save file</button>
+              <button id="config-rename" type="button">Rename</button>
+              <button id="config-delete" class="danger" type="button">Delete file</button>
+            </div>
+          </div>
         </div>
       </section>
 
