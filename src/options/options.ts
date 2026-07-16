@@ -3,6 +3,7 @@
 // store operation is wrapped so a failure surfaces in the status line rather
 // than throwing and leaving a blank page.
 import { openConfigStore } from "../storage/config-store";
+import { initPluginsUI } from "./options-plugins";
 
 const store = openConfigStore();
 
@@ -43,6 +44,11 @@ function setStatus(message: string, kind: StatusKind, autoClear = false): void {
     }, 5000);
   }
 }
+
+document.addEventListener("nib-status", (e) => {
+  const d = (e as CustomEvent<{ message: string; kind: "ok" | "err" | "info" }>).detail;
+  setStatus(d.message, d.kind, d.kind !== "err");
+});
 
 function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -141,3 +147,4 @@ clearBtn.addEventListener("click", () => void onClear());
 enabledBox.addEventListener("change", () => void onToggleEnabled());
 
 void loadInitialState();
+initPluginsUI();

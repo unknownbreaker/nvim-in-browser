@@ -243,6 +243,41 @@
 
       <hr />
 
+      <section id="plugins-section">
+        <label class="field-label">Plugins (pure-Lua / Vimscript only)</label>
+        <div class="note" style="border-left-color: var(--accent); margin-bottom: 12px">
+          Installs into <code>pack/plugins/start</code> and auto-loads on boot.
+          Plugins that spawn processes or use the network (LSP, Telescope+ripgrep,
+          Treesitter parsers, Mason, plugin managers) will <strong>not</strong> work.
+        </div>
+        <div class="row">
+          <input
+            id="plugin-repo"
+            type="url"
+            placeholder="owner/repo  (e.g. echasnovski/mini.nvim)"
+            aria-label="GitHub owner/repo to install"
+            style="flex: 2 1 260px"
+          />
+          <input
+            id="plugin-ref"
+            type="url"
+            placeholder="ref (default: main)"
+            aria-label="git ref"
+            style="flex: 1 1 120px"
+          />
+          <button id="plugin-add" class="primary" type="button">Add from GitHub</button>
+        </div>
+        <div class="row">
+          <input id="plugin-folder" type="file" webkitdirectory aria-label="Upload a plugin folder" />
+          <span class="hint" style="color: var(--subtext); font-size: 0.8rem"
+            >…or upload a plugin folder from disk</span
+          >
+        </div>
+        <ul id="plugin-list" style="list-style: none; padding: 0; margin: 16px 0 0"></ul>
+      </section>
+
+      <hr />
+
       <section>
         <div class="checkbox-row">
           <input id="enabled" type="checkbox" />
