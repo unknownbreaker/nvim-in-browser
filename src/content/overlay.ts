@@ -62,10 +62,105 @@ function positionFrame(frame: HTMLIFrameElement, target: Target): void {
   ].join(";");
 }
 
+// The single reused toast element. Created lazily on first showNotice call and
+// reused (with its contents rebuilt) thereafter, so a burst of activations
+// never stacks overlapping pills.
+let noticeEl: HTMLDivElement | null = null;
+let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Dismissible, auto-fading fallback toast shown when activation can't proceed
+// (no eligible field, focus trapped in a cross-origin iframe, etc.). Styled
+// entirely inline — no external CSS, no dependency on the host page's styles —
+// and pinned to the top layer. Must never throw: it runs on arbitrary pages
+// and a thrown error here would surface as an unhandled content-script error.
+function showNotice(message: string, withScratchAction: boolean): void {
+  try {
+    if (noticeTimer !== null) {
+      clearTimeout(noticeTimer);
+      noticeTimer = null;
+    }
+    noticeEl?.remove();
+
+    const pill = document.createElement("div");
+    noticeEl = pill;
+    pill.style.cssText = [
+      "position:fixed",
+      "z-index:2147483647",
+      "top:16px",
+      "left:50%",
+      "transform:translateX(-50%)",
+      "display:flex",
+      "align-items:center",
+      "gap:12px",
+      "max-width:min(90vw,520px)",
+      "padding:10px 16px",
+      "border-radius:9999px",
+      "background:#1e1e2e",
+      "color:#ffffff",
+      "font:14px/1.4 system-ui,-apple-system,sans-serif",
+      "box-shadow:0 8px 32px rgba(0,0,0,.5)",
+      "cursor:pointer",
+    ].join(";");
+
+    const dismiss = (): void => {
+      if (noticeTimer !== null) {
+        clearTimeout(noticeTimer);
+        noticeTimer = null;
+      }
+      pill.remove();
+      if (noticeEl === pill) noticeEl = null;
+    };
+
+    const text = document.createElement("span");
+    text.textContent = message;
+    pill.appendChild(text);
+
+    if (withScratchAction) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Open scratch page";
+      button.style.cssText = [
+        "flex:none",
+        "padding:4px 12px",
+        "border:0",
+        "border-radius:9999px",
+        "background:#89b4fa",
+        "color:#1e1e2e",
+        "font:600 13px/1.4 system-ui,-apple-system,sans-serif",
+        "cursor:pointer",
+      ].join(";");
+      button.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        try {
+          chrome.runtime.sendMessage({ type: "open-scratch" });
+        } catch {
+          // Extension context may be gone (reload/update); nothing to do.
+        }
+        dismiss();
+      });
+      pill.appendChild(button);
+    }
+
+    pill.addEventListener("click", dismiss);
+    document.body.appendChild(pill);
+
+    noticeTimer = setTimeout(dismiss, 5000);
+  } catch {
+    // Never let a notice failure bubble into the host page.
+  }
+}
+
 function activate(): void {
   if (active) return;
   const target = eligibleTarget();
-  if (!target) return;
+  if (!target) {
+    if (document.activeElement?.tagName === "IFRAME") {
+      showNotice("Can't edit fields inside embedded frames. Open the scratch page instead?", true);
+    } else {
+      showNotice("Focus a text field first, or open the scratch page.", true);
+    }
+    return;
+  }
 
   const frame = document.createElement("iframe");
   frame.src = chrome.runtime.getURL("engine-frame.html?mode=embed");
