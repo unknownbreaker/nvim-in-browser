@@ -82,6 +82,10 @@
         font-size: 0.9rem;
         line-height: 1.5;
         tab-size: 2;
+        /* Match the highlight <pre>'s reserved gutter so both layers wrap text
+           at the same column when the buffer scrolls (keeps colored glyphs
+           aligned under the transparent caret text). */
+        scrollbar-gutter: stable;
       }
       /* Wrapper (built in JS by initEditorHighlight) positions the highlight
          layer behind the textarea. */
@@ -109,6 +113,11 @@
         tab-size: 2;
         white-space: pre-wrap;
         word-break: break-word;
+        /* Reserve the scrollbar gutter so the pre's text column width matches
+           the textarea's whether or not its vertical scrollbar is showing —
+           otherwise soft-wrap points diverge and colored glyphs drift off the
+           caret once the buffer scrolls. */
+        scrollbar-gutter: stable;
       }
       pre#editor-highlight .tok-comment {
         color: var(--subtext);
