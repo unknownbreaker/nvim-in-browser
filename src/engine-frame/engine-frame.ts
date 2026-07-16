@@ -10,6 +10,8 @@
 import { NvimClient } from "../engine/client";
 import { openScratchStore, serializeError, type ScratchStore } from "../scratch/scratch-store";
 import { openConfigStore } from "../storage/config-store";
+import { openPluginStore } from "../storage/plugin-store";
+import { pluginsToConfigFiles } from "../plugins/pack-layout";
 import { GridRenderer } from "../ui/grid-renderer";
 import { isEscapeChord, keyEventToNvim } from "../ui/keymap";
 
@@ -244,48 +246,69 @@ function wireClient(c: NvimClient): void {
 // client, so this must run before any client.start.
 wireClient(client);
 
-// Resolve how to boot nvim from the persisted user config. When the config is
-// enabled and carries a non-empty init.lua, return the argv that lets nvim read
-// $XDG_CONFIG_HOME/nvim/init.lua (dropping `-u NORC --noplugin`) plus every
-// config file staged into the worker FS under /home/.config/nvim. Any IndexedDB
-// failure degrades to a clean boot — persistence problems must never keep the
-// editor from starting.
+// Resolve how to boot nvim from the persisted user config AND installed plugins.
+// A single master switch (config meta.enabled) gates BOTH: when it is off, boot
+// is byte-identical clean — no config files and no plugins, regardless of
+// per-plugin flags. When it is on, the returned configFiles union the user's
+// config (staged under /home/.config/nvim, included only when init.lua is
+// non-empty) with every enabled-plugin file (staged into the site pack dir under
+// pack/plugins/start via pluginsToConfigFiles), and the argv drops
+// `-u NORC --noplugin` so nvim reads init.lua and auto-sources the pack. If the
+// union is empty (no init.lua, no enabled plugins) it also falls back to the
+// clean boot. Any IndexedDB failure degrades to a clean boot — persistence
+// problems must never keep the editor from starting.
 async function resolveBoot(): Promise<{
   argv?: string[];
   configFiles?: { path: string; data: Uint8Array }[];
   usedConfig: boolean;
 }> {
   try {
-    const store = openConfigStore();
-    const [meta, files] = await Promise.all([store.getMeta(), store.loadFiles()]);
+    const configStore = openConfigStore();
+    const pluginStore = openPluginStore();
+    const [meta, files, plugins] = await Promise.all([
+      configStore.getMeta(),
+      configStore.loadFiles(),
+      pluginStore.list(),
+    ]);
+    // Master switch: when the user has unchecked "load my config", boot is
+    // byte-identical clean — no config files AND no plugins, regardless of
+    // per-plugin flags.
+    if (!meta.enabled) return { usedConfig: false };
+
+    const encoder = new TextEncoder();
+    const configFiles: { path: string; data: Uint8Array }[] = [];
     const initLua = files["init.lua"];
-    if (meta.enabled && typeof initLua === "string" && initLua.trim().length > 0) {
-      const encoder = new TextEncoder();
-      const configFiles = Object.entries(files).map(([relpath, content]) => ({
-        path: "/home/.config/nvim/" + relpath,
-        data: encoder.encode(content),
-      }));
-      // `--cmd` runs BEFORE plugins/init load, so netrw's load-guard skips it.
-      // Without this, nvim's WASI cwd is `/` (a directory), so the startup
-      // buffer becomes a netrw directory listing — nomodifiable+readonly — which
-      // breaks scratch-restore and overlay text-seed (nvim_buf_set_lines fails
-      // with "Buffer is not 'modifiable'"). netrw is non-functional in this
-      // sandbox anyway. The clean/default boot (NVIM_ARGV, with --noplugin)
-      // already excludes netrw, so this only affects config boots.
-      return {
-        argv: [
-          "nvim",
-          "--cmd",
-          "let g:loaded_netrw=1 | let g:loaded_netrwPlugin=1",
-          "--embed",
-          "-i",
-          "NONE",
-          "-n",
-        ],
-        configFiles,
-        usedConfig: true,
-      };
+    if (typeof initLua === "string" && initLua.trim().length > 0) {
+      for (const [relpath, content] of Object.entries(files)) {
+        configFiles.push({ path: "/home/.config/nvim/" + relpath, data: encoder.encode(content) });
+      }
     }
+    // pluginsToConfigFiles already filters to enabled plugins.
+    const pluginFiles = pluginsToConfigFiles(plugins);
+    const allFiles = [...configFiles, ...pluginFiles];
+
+    // Nothing to load (no init.lua, no enabled plugins) -> byte-identical clean.
+    if (allFiles.length === 0) return { usedConfig: false };
+
+    // `--cmd` runs BEFORE plugins/init load, so netrw's load-guard skips it.
+    // Without this, nvim's WASI cwd is `/` (a directory), so the startup buffer
+    // becomes a netrw directory listing — nomodifiable+readonly — which breaks
+    // scratch-restore and overlay text-seed. The clean/default boot (NVIM_ARGV,
+    // with --noplugin) already excludes netrw, so this only affects config/plugin
+    // boots (which drop --noplugin so pack/plugins/start auto-loads).
+    return {
+      argv: [
+        "nvim",
+        "--cmd",
+        "let g:loaded_netrw=1 | let g:loaded_netrwPlugin=1",
+        "--embed",
+        "-i",
+        "NONE",
+        "-n",
+      ],
+      configFiles: allFiles,
+      usedConfig: true,
+    };
   } catch (e) {
     console.warn("[config] load failed, booting without config:", serializeError(e));
   }
