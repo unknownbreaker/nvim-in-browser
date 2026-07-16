@@ -460,6 +460,23 @@ async function run(exec, headless, id) {
     }
     console.log("PERF: ASSERT OK: cold boot under budget");
 
+    // LAYOUT GATE: the scratch iframe must FILL the viewport (minus the small
+    // inset margin), not collapse to the default 300x150 replaced-element size.
+    // Regression guard for the scratch.html inset bug.
+    const layout = await page.evaluate(() => {
+      const f = document.getElementById("nvim");
+      return { iw: f.clientWidth, ih: f.clientHeight, vw: innerWidth, vh: innerHeight };
+    });
+    console.log(`[layout] scratch iframe ${layout.iw}x${layout.ih}, viewport ${layout.vw}x${layout.vh}`);
+    if (layout.iw < layout.vw - 60 || layout.ih < layout.vh - 60) {
+      await browser.close();
+      return {
+        ok: false,
+        reason: `scratch iframe did not fill the viewport: ${layout.iw}x${layout.ih} vs ${layout.vw}x${layout.vh} (collapsed-iframe regression?)`,
+      };
+    }
+    console.log("[layout] ASSERT OK: scratch iframe fills the viewport (inset margin only)");
+
     // Drive input through the debug hook (rpcnotify path; no real focus needed).
     await frame.evaluate(() => window.__nvim.input("ihello world"));
     await wait(500);
