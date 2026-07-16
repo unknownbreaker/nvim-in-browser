@@ -136,8 +136,8 @@ async function onRefresh(p: PluginRecord): Promise<void> {
   status(`Refreshing ${p.name}…`, "info");
   try {
     const token = (await tokenStore.get()) ?? undefined;
-    const { files } = await fetchGithubPlugin(p.repo, p.ref, { token });
-    await store.add({ ...p, files, addedAt: Date.now() });
+    const { files, ref } = await fetchGithubPlugin(p.repo, p.ref, { token });
+    await store.add({ ...p, ref, files, addedAt: Date.now() });
     status(`Refreshed ${p.name} (${files.length} files). (reload your editor)`, "ok");
     await render();
   } catch (err) {
@@ -147,7 +147,9 @@ async function onRefresh(p: PluginRecord): Promise<void> {
 
 async function onAddGithub(): Promise<void> {
   const repo = el<HTMLInputElement>("plugin-repo").value.trim();
-  const ref = el<HTMLInputElement>("plugin-ref").value.trim() || "main";
+  // Blank ref -> fetchGithubPlugin resolves the repo's default branch (main vs
+  // master vs …), so the user doesn't have to know which a repo uses.
+  const ref = el<HTMLInputElement>("plugin-ref").value.trim();
   if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) {
     status("Enter a plugin as owner/repo (e.g. echasnovski/mini.nvim).", "info");
     return;
@@ -159,22 +161,22 @@ async function onAddGithub(): Promise<void> {
   }
   const btn = el<HTMLButtonElement>("plugin-add");
   btn.disabled = true;
-  status(`Fetching ${repo}@${ref}…`, "info");
+  status(`Fetching ${repo}${ref ? "@" + ref : ""}…`, "info");
   try {
     if (await store.get(name)) {
       status(`A plugin named "${name}" is already installed — remove or refresh it first.`, "err");
       return;
     }
     const token = (await tokenStore.get()) ?? undefined;
-    const { files } = await fetchGithubPlugin(repo, ref, { token });
+    const { files, ref: resolvedRef } = await fetchGithubPlugin(repo, ref, { token });
     if (files.length === 0) {
-      status(`No .lua/.vim files found in ${repo}@${ref}.`, "err");
+      status(`No .lua/.vim files found in ${repo}@${resolvedRef}.`, "err");
       return;
     }
-    await store.add({ name, source: "github", repo, ref, enabled: true, files, addedAt: Date.now() });
+    await store.add({ name, source: "github", repo, ref: resolvedRef, enabled: true, files, addedAt: Date.now() });
     el<HTMLInputElement>("plugin-repo").value = "";
     el<HTMLInputElement>("plugin-ref").value = "";
-    status(`Installed ${name} (${files.length} files). (reload your editor)`, "ok");
+    status(`Installed ${name} (${files.length} files) from ${repo}@${resolvedRef}. (reload your editor)`, "ok");
     await render();
   } catch (err) {
     status(`Install failed: ${fetchErrorMessage(err)}`, "err");

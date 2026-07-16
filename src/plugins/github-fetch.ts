@@ -95,7 +95,7 @@ export async function fetchGithubPlugin(
   repo: string,
   ref: string,
   opts: FetchOptions = {},
-): Promise<{ files: { path: string; data: Uint8Array }[] }> {
+): Promise<{ files: { path: string; data: Uint8Array }[]; ref: string }> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const token = opts.token;
   const [owner, name] = repo.split("/");
@@ -112,19 +112,23 @@ export async function fetchGithubPlugin(
     }
   };
 
-  // With a token, learn whether the repo is private so we pick the right blob
-  // source (raw for public, blobs API for private). Without a token we assume
-  // public (raw) — a private repo would 404 on the tree call below anyway.
+  // Fetch repo metadata when we need it: to resolve a BLANK ref to the repo's
+  // default branch (repos vary — main vs master vs trunk, so a hardcoded "main"
+  // 404s on many), and/or, with a token, to learn `private` (which picks the
+  // blob source: raw for public, the blobs API for private). One call covers both.
+  let effectiveRef = ref;
   let isPrivate = false;
-  if (token) {
+  if (!effectiveRef || token) {
     const metaRes = await getApi(api(""));
-    const metaErr = apiError(metaRes, repo, ref);
+    const metaErr = apiError(metaRes, repo, ref || "(default branch)");
     if (metaErr) throw metaErr;
-    isPrivate = ((await metaRes.json()) as { private?: boolean }).private === true;
+    const meta = (await metaRes.json()) as { private?: boolean; default_branch?: string };
+    isPrivate = meta.private === true;
+    if (!effectiveRef) effectiveRef = meta.default_branch ?? "main";
   }
 
-  const treeRes = await getApi(api(`/git/trees/${encodeURIComponent(ref)}?recursive=1`));
-  const treeErr = apiError(treeRes, repo, ref);
+  const treeRes = await getApi(api(`/git/trees/${encodeURIComponent(effectiveRef)}?recursive=1`));
+  const treeErr = apiError(treeRes, repo, effectiveRef);
   if (treeErr) throw treeErr;
 
   const body = (await treeRes.json()) as { tree?: TreeEntry[] };
@@ -148,7 +152,7 @@ export async function fetchGithubPlugin(
       // through the authenticated git-blobs API (base64).
       if (!b.sha) throw new GithubFetchError("network", `${b.path}: missing blob sha`);
       const blobRes = await getApi(api(`/git/blobs/${b.sha}`));
-      const blobErr = apiError(blobRes, repo, ref);
+      const blobErr = apiError(blobRes, repo, effectiveRef);
       if (blobErr) throw blobErr;
       const blob = (await blobRes.json()) as { content?: string; encoding?: string };
       if (blob.encoding !== "base64" || typeof blob.content !== "string") {
@@ -156,7 +160,7 @@ export async function fetchGithubPlugin(
       }
       data = decodeBase64(blob.content);
     } else {
-      const rawUrl = `https://raw.githubusercontent.com/${owner}/${name}/${ref}/${b.path}`;
+      const rawUrl = `https://raw.githubusercontent.com/${owner}/${name}/${effectiveRef}/${b.path}`;
       let res: Response;
       try {
         res = await fetchImpl(rawUrl);
@@ -170,5 +174,5 @@ export async function fetchGithubPlugin(
     }
     files.push({ path: b.path, data });
   }
-  return { files };
+  return { files, ref: effectiveRef };
 }

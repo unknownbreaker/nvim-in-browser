@@ -189,6 +189,24 @@ describe("fetchGithubPlugin", () => {
     expect(new TextDecoder().decode(files[0].data)).toBe("ok");
   });
 
+  it("resolves a blank ref to the repo's default branch", async () => {
+    const { fn } = recordingFetch((url) => {
+      if (url.endsWith("/repos/o/r")) {
+        return new Response(JSON.stringify({ private: false, default_branch: "master" }), { status: 200 });
+      }
+      if (url.includes("/git/trees/master")) {
+        return treeJson([{ path: "plugin/foo.lua", type: "blob", size: 3, sha: "abc" }]);
+      }
+      if (url.includes("raw.githubusercontent.com/o/r/master/")) {
+        return new Response("ok", { status: 200 });
+      }
+      throw new TypeError("network");
+    });
+    const { files, ref } = await fetchGithubPlugin("o/r", "", { fetchImpl: fn });
+    expect(ref).toBe("master");
+    expect(files.map((x) => x.path)).toEqual(["plugin/foo.lua"]);
+  });
+
   it("maps a 401 to kind unauthorized", async () => {
     const f = fakeFetch({ "api.github.com": () => new Response("", { status: 401 }) });
     await expect(
