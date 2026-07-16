@@ -1,6 +1,7 @@
 // Options page shell: owns the shared status line and wires the config + plugin
 // UI modules. All feature logic lives in options-config.ts / options-plugins.ts.
 import { initConfigUI } from "./options-config";
+import { initEditorHighlight } from "./options-highlight";
 import { initPluginsUI } from "./options-plugins";
 import { initNav } from "./options-nav";
 import { initStatusUI } from "./options-status";
@@ -32,5 +33,6 @@ document.addEventListener("nib-status", (e) => {
 
 initNav();
 initConfigUI();
+initEditorHighlight();
 initPluginsUI();
 initStatusUI();
