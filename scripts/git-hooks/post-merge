@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# post-merge — after a `git pull`/merge, bring the working tree's build inputs
+# back in sync automatically:
+#   * package.json / package-lock.json changed -> npm ci
+#   * engine.lock.json changed (pinned nvim-wasi version) -> npm run fetch-assets
+#   * anything under src/ changed -> npm run build
+#
+# Installed via core.hooksPath (see package.json "prepare" and the "Develop"
+# section of the README). Enable manually with:
+#   git config core.hooksPath scripts/git-hooks
+#
+# NOTE: this fires after a MERGE-style pull. A rebase pull (pull.rebase=true)
+# does not trigger post-merge — in that case run
+#   npm ci && npm run fetch-assets && npm run build
+# by hand.
+set -euo pipefail
+
+# ORIG_HEAD is the pre-merge tip; HEAD is the new tip. If there's no ORIG_HEAD
+# (e.g. a brand-new repo), there's nothing to compare — bail quietly.
+if ! git rev-parse --verify --quiet ORIG_HEAD >/dev/null; then
+  exit 0
+fi
+
+changed=$(git diff --name-only ORIG_HEAD HEAD)
+
+has_change() {
+  printf '%s\n' "$changed" | grep -qE "$1"
+}
+
+cd "$(git rev-parse --show-toplevel)"
+
+# Order matters: npm ci reinstalls node_modules, so run it before build.
+if has_change '^package(-lock)?\.json$'; then
+  echo "[post-merge] package.json changed -> npm ci"
+  npm ci
+fi
+
+# The pinned nvim-wasi engine version + hashes live in engine.lock.json; a change
+# means a new engine to fetch. fetch-assets is idempotent (skips a matching copy).
+if has_change '^engine\.lock\.json$'; then
+  echo "[post-merge] engine.lock.json changed -> npm run fetch-assets"
+  npm run fetch-assets
+fi
+
+if has_change '^src/'; then
+  echo "[post-merge] src/ changed -> npm run build"
+  npm run build
+fi
+
+echo "[post-merge] up to date"
