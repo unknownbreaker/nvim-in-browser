@@ -16,6 +16,10 @@ const params = new URLSearchParams(location.search);
 const mode = params.get("mode") ?? "full";
 
 const canvas = document.getElementById("grid") as HTMLCanvasElement;
+// Hidden-but-focusable input that owns focus so the browser routes IME
+// composition (and its candidate window) here. keydown still bubbles to
+// `document`, so the normal keymap path is unaffected for non-composition keys.
+const ime = document.getElementById("ime") as HTMLInputElement;
 const renderer = new GridRenderer(canvas);
 const client = new NvimClient(
   chrome.runtime.getURL("engine-worker.js"),
@@ -44,7 +48,34 @@ let cachedFinalText: string | null = null;
 // which leaves the embed-only `nvim-text` post as the sole change reaction.
 let scratchOnChange: (() => void) | null = null;
 
-client.onRedraw = (batch) => renderer.apply(batch);
+client.onRedraw = (batch) => {
+  renderer.apply(batch);
+  // Park the hidden IME input at the caret so the composition candidate window
+  // appears where the user is typing.
+  const p = renderer.cursorPixel();
+  ime.style.left = `${p.x}px`;
+  ime.style.top = `${p.y}px`;
+  ime.style.height = `${p.height}px`;
+};
+
+// IME composition: while composing, keydown events feed the input (and are
+// suppressed in the document handler below). On compositionend, forward the
+// finished text to nvim as literal input and reset the field.
+let composing = false;
+ime.addEventListener("compositionstart", () => {
+  composing = true;
+});
+ime.addEventListener("compositionend", (ev) => {
+  composing = false;
+  const text = (ev as CompositionEvent).data ?? "";
+  if (text) client.input(text);
+  ime.value = "";
+});
+// Guard: any stray text that lands outside composition is dropped so it can't
+// leak into nvim or accumulate in the input.
+ime.addEventListener("input", () => {
+  if (!composing) ime.value = "";
+});
 client.onStat = (wps) => {
   debug.wakeupsPerSecond = wps;
   console.log(`[nvim] poll wakeups/sec: ${wps}`);
@@ -65,6 +96,11 @@ document.addEventListener("keydown", (ev) => {
     void deactivate();
     return;
   }
+  // Keys that are feeding an active IME composition (isComposing) or the
+  // pre-composition sentinel (keyCode 229) must not be forwarded to nvim — the
+  // composed text arrives via compositionend instead. Checked after the escape
+  // chord so the chord always wins.
+  if (ev.isComposing || ev.keyCode === 229) return;
   const keys = keyEventToNvim(ev);
   if (keys !== null) {
     ev.preventDefault();
@@ -193,7 +229,7 @@ async function init(seedText: unknown): Promise<void> {
   await installBufferHooks();
   void syncClipboardIn();
   parent.postMessage({ type: "nvim-ready" }, "*");
-  canvas.focus();
+  ime.focus();
 }
 
 if (mode === "embed") {
@@ -243,5 +279,5 @@ async function startScratch(): Promise<void> {
   });
   window.addEventListener("beforeunload", flush);
   void channel; // channel already used by installBufferHooks; kept for clarity
-  canvas.focus();
+  ime.focus();
 }

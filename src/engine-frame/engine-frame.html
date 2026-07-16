@@ -18,6 +18,33 @@
   </head>
   <body>
     <canvas id="grid" tabindex="0"></canvas>
+    <!-- Hidden-but-focusable IME input. Holds focus so the browser routes
+         composition (and its candidate window) here; the script parks it at the
+         caret on every redraw. Must NOT use display:none/visibility:hidden —
+         those disable IME. opacity:0 keeps it invisible yet composable. -->
+    <input
+      id="ime"
+      autocomplete="off"
+      autocorrect="off"
+      autocapitalize="off"
+      spellcheck="false"
+      style="
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 1px;
+        height: 1em;
+        padding: 0;
+        border: 0;
+        margin: 0;
+        background: transparent;
+        color: transparent;
+        caret-color: transparent;
+        outline: none;
+        z-index: 1;
+        opacity: 0;
+      "
+    />
     <script type="module" src="./engine-frame.js"></script>
   </body>
 </html>
