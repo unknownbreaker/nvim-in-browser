@@ -239,7 +239,15 @@ async function bootWithSafeMode(cols: number, rows: number): Promise<void> {
       setTimeout(() => reject(new Error("config boot timed out")), 12_000),
     );
     await Promise.race([
-      client.start(cols, rows, { argv: boot.argv, configFiles: boot.configFiles }),
+      (async () => {
+        await client.start(cols, rows, { argv: boot.argv, configFiles: boot.configFiles });
+        // A broken config can wedge nvim AFTER nvim_ui_attach resolves — e.g. an
+        // init.lua that loops once startup finishes attaching the UI. start()
+        // would still resolve, so prove the RPC channel is actually live with a
+        // trivial round-trip; a post-attach hang then trips the same watchdog and
+        // falls back to safe mode rather than leaving the editor silently wedged.
+        await client.request("nvim_eval", ["1"]);
+      })(),
       timeout,
     ]);
     debug.safeMode = false;
