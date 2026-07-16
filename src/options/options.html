@@ -74,7 +74,9 @@
         tab-size: 2;
       }
       textarea#editor:focus,
-      input[type="url"]:focus {
+      input[type="url"]:focus,
+      input[type="text"]:focus,
+      input[type="password"]:focus {
         outline: none;
         border-color: var(--accent);
         box-shadow: 0 0 0 2px rgba(137, 180, 250, 0.25);
@@ -118,7 +120,9 @@
       button.danger:hover {
         background: rgba(243, 139, 168, 0.15);
       }
-      input[type="url"] {
+      input[type="url"],
+      input[type="text"],
+      input[type="password"] {
         flex: 1 1 320px;
         min-width: 0;
         background: var(--surface);
@@ -128,6 +132,19 @@
         padding: 8px 12px;
         font-family: var(--mono);
         font-size: 0.85rem;
+      }
+      /* Inline label wrapping a native file input, e.g. "Import folder: […]". */
+      .control {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.85rem;
+        color: var(--subtext);
+      }
+      input[type="file"] {
+        font-size: 0.8rem;
+        color: var(--subtext);
+        max-width: 100%;
       }
       .checkbox-row {
         display: flex;
@@ -212,24 +229,93 @@
       </div>
 
       <section id="config-section">
-        <label class="field-label">Config files (<code>~/.config/nvim</code>)</label>
-        <div class="row">
-          <input id="config-new" type="url" placeholder="new file path (e.g. lua/opts.lua)" style="flex: 2 1 220px" />
-          <button id="config-add" type="button">New file</button>
-          <input id="config-folder" type="file" webkitdirectory aria-label="Import a config folder" />
-          <input id="fetch-url" type="url" placeholder="https://…/init.lua" style="flex: 1 1 200px" />
-          <button id="fetch" type="button">Fetch to init.lua</button>
-          <button id="clear" class="danger" type="button">Clear all</button>
+        <label class="field-label">Config files</label>
+        <div class="note" style="margin-bottom: 12px">
+          These are your <code>~/.config/nvim</code> files, stored
+          <strong>in this browser</strong> — not on your computer's disk.
+          <code>init.lua</code> runs when the editor boots; files under
+          <code>lua/</code> load with <code>require()</code> (e.g.
+          <code>lua/opts.lua</code> → <code>require("opts")</code> from your
+          <code>init.lua</code>). Pick a file in the list to edit it, then
+          <strong>Save</strong> and reload your editor tab to apply. Hover any
+          control for a tip.
         </div>
+
+        <div class="row">
+          <input
+            id="config-new"
+            type="text"
+            placeholder="New file path, relative to ~/.config/nvim — e.g. lua/opts.lua"
+            title="Create a new config file. The path is relative to ~/.config/nvim. Use lua/… for require() modules — lua/opts.lua is loaded by require('opts')."
+            aria-label="New config file path"
+            style="flex: 1 1 100%"
+          />
+          <button
+            id="config-add"
+            type="button"
+            title="Create the file typed above and open it for editing."
+          >
+            New file
+          </button>
+        </div>
+
+        <div class="row">
+          <input
+            id="fetch-url"
+            type="url"
+            placeholder="Fetch an init.lua from a raw URL — e.g. https://example.com/init.lua"
+            title="Download a raw init.lua from a URL into the editor. Review it, then Save. Raw GitHub / gist URLs work."
+            aria-label="URL to fetch init.lua from"
+            style="flex: 1 1 100%"
+          />
+          <button
+            id="fetch"
+            type="button"
+            title="Fetch the URL above into the init.lua editor (review, then Save)."
+          >
+            Fetch to init.lua
+          </button>
+        </div>
+
+        <div class="row">
+          <label
+            class="control"
+            title="Import a whole ~/.config/nvim folder from disk. This is a one-time snapshot copy — editing the folder on disk afterward does NOT sync back here."
+          >
+            Import folder:
+            <input id="config-folder" type="file" webkitdirectory aria-label="Import a config folder" />
+          </label>
+          <button
+            id="clear"
+            class="danger"
+            type="button"
+            title="Delete ALL saved config files from this browser. Cannot be undone."
+            style="margin-left: auto"
+          >
+            Clear all
+          </button>
+        </div>
+
         <div class="row" style="align-items: stretch">
-          <ul id="config-list" style="list-style: none; padding: 0; margin: 0; flex: 1 1 180px; min-width: 160px"></ul>
+          <ul
+            id="config-list"
+            title="Your saved config files. Click one to edit it."
+            style="list-style: none; padding: 0; margin: 0; flex: 1 1 180px; min-width: 160px"
+          ></ul>
           <div style="flex: 3 1 360px; min-width: 0">
             <label class="field-label" id="config-editing-label" for="editor">init.lua</label>
-            <textarea id="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="config file contents"></textarea>
+            <textarea
+              id="editor"
+              spellcheck="false"
+              autocapitalize="off"
+              autocomplete="off"
+              aria-label="config file contents"
+              title="Edit the selected file here. Save to persist it in the browser, then reload your editor tab to apply."
+            ></textarea>
             <div class="row">
-              <button id="save" class="primary" type="button">Save file</button>
-              <button id="config-rename" type="button">Rename</button>
-              <button id="config-delete" class="danger" type="button">Delete file</button>
+              <button id="save" class="primary" type="button" title="Save the current file to the browser (reload your editor tab to apply).">Save file</button>
+              <button id="config-rename" type="button" title="Rename the current file.">Rename</button>
+              <button id="config-delete" class="danger" type="button" title="Delete the current file from the browser.">Delete file</button>
             </div>
           </div>
         </div>
@@ -248,24 +334,36 @@
           <input
             id="plugin-repo"
             type="url"
-            placeholder="owner/repo  (e.g. echasnovski/mini.nvim)"
+            placeholder="GitHub owner/repo — e.g. echasnovski/mini.nvim"
+            title="The GitHub repository of a pure-Lua/Vimscript plugin, as owner/repo. It is fetched over the public GitHub API and staged into pack/plugins/start."
             aria-label="GitHub owner/repo to install"
-            style="flex: 2 1 260px"
+            style="flex: 1 1 100%"
           />
           <input
             id="plugin-ref"
             type="url"
-            placeholder="ref (default: main)"
+            placeholder="ref / branch / tag (default: main)"
+            title="Which branch, tag, or commit to install. Defaults to main."
             aria-label="git ref"
-            style="flex: 1 1 120px"
+            style="flex: 0 1 200px"
           />
-          <button id="plugin-add" class="primary" type="button">Add from GitHub</button>
+          <button
+            id="plugin-add"
+            class="primary"
+            type="button"
+            title="Fetch the repo above and install it (enabled). Reload your editor tab to load it."
+          >
+            Add from GitHub
+          </button>
         </div>
         <div class="row">
-          <input id="plugin-folder" type="file" webkitdirectory aria-label="Upload a plugin folder" />
-          <span class="hint" style="color: var(--subtext); font-size: 0.8rem"
-            >…or upload a plugin folder from disk</span
+          <label
+            class="control"
+            title="Install a plugin from a folder on disk instead of GitHub (a one-time snapshot copy). The top folder name becomes the plugin name."
           >
+            …or upload a plugin folder:
+            <input id="plugin-folder" type="file" webkitdirectory aria-label="Upload a plugin folder" />
+          </label>
         </div>
 
         <label class="field-label" for="gh-token" style="margin-top: 16px"
@@ -283,13 +381,14 @@
           <input
             id="gh-token"
             type="password"
-            placeholder="github_pat_…  (leave blank to keep the saved one)"
+            placeholder="github_pat_… — paste a token (leave blank to keep the saved one)"
+            title="A GitHub personal access token. Fine-grained + read-only is enough; add Contents:read only for the private repos you install. Stored in a separate local database, sent only to GitHub."
             autocomplete="off"
             aria-label="GitHub personal access token"
-            style="flex: 2 1 260px"
+            style="flex: 1 1 100%"
           />
-          <button id="gh-token-save" type="button">Save token</button>
-          <button id="gh-token-clear" class="danger" type="button">Clear</button>
+          <button id="gh-token-save" type="button" title="Save the token to a separate local database (not your config).">Save token</button>
+          <button id="gh-token-clear" class="danger" type="button" title="Delete the saved token from this browser.">Clear</button>
           <span
             id="gh-token-status"
             class="hint"
@@ -303,7 +402,10 @@
       <hr />
 
       <section>
-        <div class="checkbox-row">
+        <div
+          class="checkbox-row"
+          title="Master switch. Checked: your config + enabled plugins load at boot. Unchecked: the editor boots as stock Neovim, ignoring everything you've saved (nothing is deleted)."
+        >
           <input id="enabled" type="checkbox" />
           <label for="enabled">
             Load my config on boot (uncheck to boot clean)
