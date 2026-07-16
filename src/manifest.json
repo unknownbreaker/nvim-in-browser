@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "nvim-in-browser",
+  "name": "Neovim in Browser",
   "version": "0.0.0",
   "description": "Real Neovim (WASM) editing in browser text fields and a scratch page — no local Neovim required",
   "permissions": ["clipboardRead", "clipboardWrite"],

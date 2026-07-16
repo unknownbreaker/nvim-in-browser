@@ -1,7 +1,8 @@
-# nvim-in-browser
+# Neovim in Browser
 
 Real Neovim — compiled to WebAssembly — editing browser text fields and a
-standalone scratch page. No local Neovim install required.
+standalone scratch page. No local Neovim install required. (Repo/package slug:
+`nvim-in-browser`.)
 
 Design: [docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md](docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md)
 
