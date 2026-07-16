@@ -316,17 +316,19 @@ function showMemoryCapNotice(): void {
 
 // Sleeping overlay: shown while an idle-torn-down scratch instance waits for a
 // keydown/click to respawn. Created lazily and toggled (not recreated) so resume
-// can simply hide it. debug.sleeping is the authoritative signal for smokes.
-function showSleepingOverlay(): void {
+// can simply hide it. The message is parameterized so a failed resume can reuse
+// the same overlay to prompt a retry. debug.sleeping is the authoritative signal
+// for smokes.
+function showSleepingOverlay(message = "💤 sleeping — press any key to resume"): void {
   if (!sleepingOverlay) {
     sleepingOverlay = document.createElement("div");
-    sleepingOverlay.textContent = "💤 sleeping — press any key to resume";
     sleepingOverlay.style.cssText =
       "position:fixed;inset:0;z-index:9998;display:flex;align-items:center;" +
       "justify-content:center;font:16px system-ui,sans-serif;color:#eee;" +
       "background:rgba(0,0,0,0.72);cursor:pointer;";
     document.body.appendChild(sleepingOverlay);
   }
+  sleepingOverlay.textContent = message;
   sleepingOverlay.style.display = "flex";
 }
 
@@ -532,15 +534,40 @@ async function startScratch(): Promise<void> {
 function installIdleLifecycle(store: ScratchStore): void {
   const sleep = async (): Promise<void> => {
     if (debug.sleeping || debug.memoryCapped) return;
+    // Capture the draft while the client is still live (currentText needs it),
+    // BEFORE flipping any state, so the read isn't racing a disposed worker.
+    let draft: string | null = null;
     try {
-      await store.save(await currentText());
+      draft = await currentText();
     } catch (e) {
-      console.warn("[scratch] idle save failed:", serializeError(e));
+      console.warn("[scratch] idle read failed:", serializeError(e));
     }
-    client.dispose();
+    // If the memory watchdog tripped during the read await it already disposed the
+    // worker and showed its notice — bail before transitioning to the (resurrectable)
+    // sleeping state and before a second dispose.
+    if (debug.memoryCapped) return;
+    // Flip to sleeping (and show the overlay) BEFORE disposing/saving so a keydown
+    // or click during the save window is routed to the wake path (resumeFromSleep)
+    // rather than client.input() on the about-to-be-disposed client, which would
+    // silently drop the keystroke and leave the restored draft one edit stale.
     debug.ready = false;
     debug.sleeping = true;
     showSleepingOverlay();
+    client.dispose();
+    if (draft !== null) {
+      try {
+        await store.save(draft);
+      } catch (e) {
+        console.warn("[scratch] idle save failed:", serializeError(e));
+      }
+    }
+    // Re-check after the save await: if the watchdog capped memory in the meantime,
+    // the memory-capped instance must NOT be resurrectable, so leave the cap notice
+    // in place and drop out of the sleeping (respawnable) state.
+    if (debug.memoryCapped) {
+      debug.sleeping = false;
+      hideSleepingOverlay();
+    }
   };
   armIdleTimer = () => {
     if (idleTimer !== null) clearTimeout(idleTimer);
@@ -550,20 +577,40 @@ function installIdleLifecycle(store: ScratchStore): void {
   // must not kick off overlapping boots.
   let resuming = false;
   resumeFromSleep = async () => {
-    if (!debug.sleeping || resuming) return;
+    // memoryCapped instances are deliberately non-resurrectable — the watchdog
+    // stopped the editor to avoid a crash loop, so never respawn one.
+    if (!debug.sleeping || debug.memoryCapped || resuming) return;
     resuming = true;
     // Fresh client + identical wiring, then the SAME init the first boot ran.
     client = makeClient();
     wireClient(client);
-    await bootScratchInstance(store);
-    debug.sleeping = false;
-    hideSleepingOverlay();
-    resuming = false;
-    armIdleTimer?.();
+    try {
+      await bootScratchInstance(store);
+      // Respawn succeeded: instance is live again.
+      debug.sleeping = false;
+      hideSleepingOverlay();
+      armIdleTimer?.();
+    } catch (e) {
+      // Respawn boot rejected (e.g. a transient RPC failure in installBufferHooks
+      // or the draft restore). Do NOT wedge: keep debug.sleeping true so the NEXT
+      // keydown/click re-enters here and retries, and update the overlay to say so.
+      // resuming is reset in finally, so the retry isn't blocked.
+      console.warn("[scratch] resume failed, will retry on next input:", serializeError(e));
+      showSleepingOverlay("⚠ resume failed — press any key to retry");
+    } finally {
+      resuming = false;
+    }
   };
   // A click anywhere also wakes a sleeping instance (the overlay is clickable).
+  // When awake, a click counts as input too, so it restarts the idle countdown —
+  // matching the keydown path (the plan resets the idle timer on ANY input).
   document.addEventListener("click", () => {
-    if (debug.sleeping) void resumeFromSleep?.();
+    if (debug.sleeping) {
+      void resumeFromSleep?.();
+      return;
+    }
+    if (debug.memoryCapped) return;
+    armIdleTimer?.();
   });
   armIdleTimer();
 }
