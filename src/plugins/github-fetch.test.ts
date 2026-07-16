@@ -53,6 +53,25 @@ describe("fetchGithubPlugin", () => {
     expect(new TextDecoder().decode(foo!.data)).toBe("vim.g.x = 1");
   });
 
+  it("skips non-runtime directories but keeps runtime modules", async () => {
+    const f = fakeFetch({
+      "api.github.com": () =>
+        treeJson([
+          { path: "lua/foo.lua", type: "blob", size: 5 },
+          { path: "lua/mini/test.lua", type: "blob", size: 5 }, // runtime module — kept
+          { path: "tests/foo_spec.lua", type: "blob", size: 5 }, // excluded
+          { path: "extras/kitty.lua", type: "blob", size: 5 }, // excluded
+          { path: ".github/gen.lua", type: "blob", size: 5 }, // excluded
+          { path: "screenshots/demo.lua", type: "blob", size: 5 }, // excluded
+        ]),
+      "raw.githubusercontent.com/o/r/main/lua/foo.lua": () => new Response("a", { status: 200 }),
+      "raw.githubusercontent.com/o/r/main/lua/mini/test.lua": () =>
+        new Response("b", { status: 200 }),
+    });
+    const { files } = await fetchGithubPlugin("o/r", "main", { fetchImpl: f });
+    expect(files.map((x) => x.path).sort()).toEqual(["lua/foo.lua", "lua/mini/test.lua"]);
+  });
+
   it("skips tree blobs whose path is not a safe relpath", async () => {
     const f = fakeFetch({
       "api.github.com": () =>
