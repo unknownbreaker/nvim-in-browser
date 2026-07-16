@@ -110,7 +110,7 @@ function renderCard(p: PluginRecord): HTMLLIElement {
   const toggle = document.createElement("input");
   toggle.type = "checkbox";
   toggle.checked = p.enabled;
-  toggle.addEventListener("change", () => void onToggle(p.name, toggle));
+  toggle.addEventListener("change", () => void onToggle(p.name, toggle, pill));
   const toggleText = document.createElement("span");
   toggleText.textContent = "Enabled";
   toggleLabel.append(toggle, toggleText);
@@ -200,10 +200,16 @@ async function onShelfInstall(entry: CuratedPlugin, btn: HTMLButtonElement): Pro
   }
 }
 
-async function onToggle(name: string, box: HTMLInputElement): Promise<void> {
+async function onToggle(name: string, box: HTMLInputElement, pill?: HTMLElement): Promise<void> {
   const enabled = box.checked;
   try {
     await store.setEnabled(name, enabled);
+    // Keep the card's status pill in sync with the toggle (it would otherwise
+    // stay stale until the next full render() after an install/remove).
+    if (pill) {
+      pill.className = enabled ? "pill pill-on" : "pill pill-off";
+      pill.textContent = enabled ? "Enabled" : "Disabled";
+    }
     refreshShell();
     status(enabled ? `${name} enabled (reload your editor).` : `${name} disabled (reload your editor).`, "info");
   } catch (err) {
