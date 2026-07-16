@@ -41,7 +41,11 @@ export class NvimClient {
     };
   }
 
-  start(cols: number, rows: number): Promise<void> {
+  start(
+    cols: number,
+    rows: number,
+    opts?: { argv?: string[]; configFiles?: { path: string; data: Uint8Array }[] },
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
       this.worker.onmessage = (ev: MessageEvent) => {
@@ -75,7 +79,15 @@ export class NvimClient {
           this.onStat(m.wakeupsPerSecond);
         }
       };
-      this.worker.postMessage({ type: "start", wasmUrl: this.wasmUrl, runtimeUrl: this.runtimeUrl });
+      // configFiles data arrays are small; structured-clone copies them (no
+      // transfer list) so the caller may keep/reuse the buffers afterward.
+      this.worker.postMessage({
+        type: "start",
+        wasmUrl: this.wasmUrl,
+        runtimeUrl: this.runtimeUrl,
+        argv: opts?.argv,
+        configFiles: opts?.configFiles,
+      });
     });
   }
 

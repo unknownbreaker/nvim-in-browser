@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>nvim-in-browser — Configuration</title>
+    <style>
+      :root {
+        --bg: #1e1e2e;
+        --surface: #181825;
+        --surface-2: #313244;
+        --overlay: #45475a;
+        --text: #cdd6f4;
+        --subtext: #a6adc8;
+        --accent: #89b4fa;
+        --green: #a6e3a1;
+        --red: #f38ba8;
+        --yellow: #f9e2af;
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code",
+          Menlo, Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+          sans-serif;
+        line-height: 1.5;
+      }
+      main {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 32px 24px 64px;
+      }
+      h1 {
+        font-size: 1.5rem;
+        font-weight: 600;
+        margin: 0 0 4px;
+      }
+      h1 .brand {
+        color: var(--accent);
+      }
+      .tagline {
+        color: var(--subtext);
+        margin: 0 0 24px;
+        font-size: 0.9rem;
+      }
+      section {
+        margin-bottom: 24px;
+      }
+      label.field-label {
+        display: block;
+        font-size: 0.85rem;
+        color: var(--subtext);
+        margin-bottom: 6px;
+      }
+      textarea#editor {
+        width: 100%;
+        min-height: 340px;
+        resize: vertical;
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--overlay);
+        border-radius: 8px;
+        padding: 14px 16px;
+        font-family: var(--mono);
+        font-size: 0.9rem;
+        line-height: 1.5;
+        tab-size: 2;
+      }
+      textarea#editor:focus,
+      input[type="url"]:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(137, 180, 250, 0.25);
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        margin-top: 12px;
+      }
+      button {
+        font: inherit;
+        font-size: 0.9rem;
+        font-weight: 500;
+        cursor: pointer;
+        border: 1px solid var(--overlay);
+        border-radius: 6px;
+        padding: 8px 16px;
+        background: var(--surface-2);
+        color: var(--text);
+        transition:
+          background 0.12s ease,
+          border-color 0.12s ease;
+      }
+      button:hover {
+        background: var(--overlay);
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #11111b;
+      }
+      button.primary:hover {
+        background: #a6c8ff;
+      }
+      button.danger {
+        border-color: var(--red);
+        color: var(--red);
+      }
+      button.danger:hover {
+        background: rgba(243, 139, 168, 0.15);
+      }
+      input[type="url"] {
+        flex: 1 1 320px;
+        min-width: 0;
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--overlay);
+        border-radius: 6px;
+        padding: 8px 12px;
+        font-family: var(--mono);
+        font-size: 0.85rem;
+      }
+      .checkbox-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        background: var(--surface);
+        border: 1px solid var(--overlay);
+        border-radius: 8px;
+        padding: 14px 16px;
+      }
+      .checkbox-row input[type="checkbox"] {
+        margin-top: 3px;
+        width: 16px;
+        height: 16px;
+        accent-color: var(--accent);
+        cursor: pointer;
+        flex: 0 0 auto;
+      }
+      .checkbox-row label {
+        cursor: pointer;
+        font-size: 0.9rem;
+      }
+      .checkbox-row .hint {
+        display: block;
+        color: var(--subtext);
+        font-size: 0.8rem;
+        margin-top: 2px;
+      }
+      #status {
+        min-height: 1.4em;
+        margin-top: 14px;
+        font-size: 0.85rem;
+        font-family: var(--mono);
+      }
+      #status.ok {
+        color: var(--green);
+      }
+      #status.err {
+        color: var(--red);
+      }
+      #status.info {
+        color: var(--subtext);
+      }
+      .note {
+        background: var(--surface);
+        border: 1px solid var(--overlay);
+        border-left: 4px solid var(--yellow);
+        border-radius: 8px;
+        padding: 14px 16px;
+        font-size: 0.85rem;
+        color: var(--subtext);
+      }
+      .note strong {
+        color: var(--text);
+      }
+      .note code {
+        font-family: var(--mono);
+        color: var(--text);
+        background: var(--surface-2);
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 0.82em;
+      }
+      hr {
+        border: none;
+        border-top: 1px solid var(--surface-2);
+        margin: 28px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1><span class="brand">nvim-in-browser</span> — Configuration</h1>
+      <p class="tagline">Edit your <code>init.lua</code> — it runs in a WASM sandbox.</p>
+
+      <div class="note">
+        <strong>This runs in a browser sandbox.</strong> Pure-Lua/Vimscript
+        config, keymaps, options, and pure-Lua plugins work. Config that spawns
+        processes or uses the network (LSP servers, git, telescope+ripgrep,
+        plugin managers that clone repos) will <strong>NOT</strong> work. Plugin
+        loading (bundling pure-Lua plugins) is coming in a follow-up.
+      </div>
+
+      <section>
+        <label class="field-label" for="editor">init.lua</label>
+        <textarea
+          id="editor"
+          spellcheck="false"
+          autocapitalize="off"
+          autocomplete="off"
+          aria-label="init.lua contents"
+        ></textarea>
+        <div class="row">
+          <button id="save" class="primary" type="button">Save</button>
+          <button id="clear" class="danger" type="button">Clear config</button>
+        </div>
+      </section>
+
+      <hr />
+
+      <section>
+        <label class="field-label" for="fetch-url">Fetch from URL</label>
+        <div class="row">
+          <input
+            id="fetch-url"
+            type="url"
+            placeholder="https://…/init.lua"
+            aria-label="URL to fetch init.lua from"
+          />
+          <button id="fetch" type="button">Fetch</button>
+        </div>
+      </section>
+
+      <hr />
+
+      <section>
+        <div class="checkbox-row">
+          <input id="enabled" type="checkbox" />
+          <label for="enabled">
+            Load my config on boot (uncheck to boot clean)
+            <span class="hint"
+              >When unchecked, editors boot with a stock Neovim and ignore your
+              saved config.</span
+            >
+          </label>
+        </div>
+      </section>
+
+      <div id="status" role="status" aria-live="polite"></div>
+    </main>
+    <script type="module" src="./options.js"></script>
+  </body>
+</html>

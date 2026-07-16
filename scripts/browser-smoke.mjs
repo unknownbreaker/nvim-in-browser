@@ -8,6 +8,16 @@
 // the buffer round-trips, screenshots the canvas, then idles ~12s to confirm
 // the engine parks (idle poll wake-ups fall to a low steady rate).
 //
+// Phases (each asserts programmatically):
+//   PHASE A — draft persists across a reload (IndexedDB scratch store).
+//   PHASE B — `"+y` yank reaches the system clipboard.
+//   PHASE C — a config saved to IndexedDB (init.lua) loads into nvim at boot:
+//             tabstop=7 is read back after a reload (proves IndexedDB -> FS ->
+//             nvim config-boot end-to-end), safeMode stays false.
+//   PHASE D — a broken/hanging config recovers via safe mode: the engine still
+//             boots (ready), safeMode is true, and the broken config did NOT
+//             apply (tabstop back to default 8). Cleans up the config after.
+//
 // Browser resolution (first that exists wins):
 //   1. $NVIM_SMOKE_CHROME               — explicit override
 //   2. Chrome for Testing under ./chrome — installed via
@@ -33,6 +43,9 @@ const shotPath = path.join(root, ".superpowers", "sdd", "task-6-boot.png");
 const SYSTEM_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 const BOOT_TIMEOUT_MS = 60_000; // first boot compiles ~8MB wasm
+// Safe-mode reboot: the broken config boot hangs its full 12s watchdog before
+// the clean retry compiles wasm, so give this path extra headroom.
+const SAFE_MODE_TIMEOUT_MS = 90_000;
 const IDLE_MS = 12_000;
 const IDLE_GATE = 5; // last idle stat sample must be <= this many wakeups/sec
 
@@ -45,6 +58,100 @@ function fail(msg) {
 
 function errText(e) {
   return e instanceof Error ? e.message : String(e);
+}
+
+// ---- config-store IndexedDB helpers (PHASE C/D) --------------------------
+// The config store lives in the SAME origin DB the app uses: name
+// "nvim-in-browser", version 2, object store "config", file records keyed
+// "file:"+relpath and a single "meta" = {enabled}. We drive it directly from
+// the page context to simulate the options page having saved a config. The
+// app already created the stores, so we open at version 2 (never lower — a
+// lower version would abort with VersionError).
+function idbWriteConfig(page, initLua, enabled) {
+  return page.evaluate(
+    ({ initLua, enabled }) =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open("nvim-in-browser", 2);
+        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
+        open.onblocked = () => reject(new Error("open blocked"));
+        open.onsuccess = () => {
+          const db = open.result;
+          let tx;
+          try {
+            tx = db.transaction("config", "readwrite");
+          } catch (e) {
+            db.close();
+            reject(new Error("tx open failed: " + (e?.message ?? String(e))));
+            return;
+          }
+          const store = tx.objectStore("config");
+          store.put(initLua, "file:init.lua");
+          store.put({ enabled }, "meta");
+          tx.oncomplete = () => {
+            db.close();
+            resolve(true);
+          };
+          tx.onerror = () => {
+            db.close();
+            reject(new Error("tx error: " + (tx.error?.message ?? "?")));
+          };
+        };
+      }),
+    { initLua, enabled },
+  );
+}
+
+// Cleanup: remove the config file and disable the config so a broken config
+// can't poison later phases, reruns, or a subsequent overlay-smoke.
+function idbClearConfig(page) {
+  return page.evaluate(
+    () =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open("nvim-in-browser", 2);
+        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
+        open.onblocked = () => reject(new Error("open blocked"));
+        open.onsuccess = () => {
+          const db = open.result;
+          const tx = db.transaction("config", "readwrite");
+          const store = tx.objectStore("config");
+          store.delete("file:init.lua");
+          store.put({ enabled: false }, "meta");
+          tx.oncomplete = () => {
+            db.close();
+            resolve(true);
+          };
+          tx.onerror = () => {
+            db.close();
+            reject(new Error("clear tx error: " + (tx.error?.message ?? "?")));
+          };
+        };
+      }),
+  );
+}
+
+// Open a FRESH scratch page and wait for its engine-frame's __nvim.ready.
+// Returns { page, frame }. We use a brand-new page (rather than page.reload)
+// for the config phases on purpose: reloading a frame while the new engine is
+// slow to boot (the safe-mode path) races the OLD frame's detach against our
+// CDP evaluate, which then hangs. A new page has its own frame tree, so there
+// is no detaching frame to bind to by mistake. IndexedDB is per-origin, so the
+// new page sees the same config store the previous page wrote. bootTimeout is
+// generous for safe mode, whose config boot burns its full 12s watchdog before
+// the clean retry compiles wasm.
+async function openScratchReady(browser, id, label, bootTimeout) {
+  const p = await browser.newPage();
+  p.on("pageerror", (err) => console.log(`  [${label} pageerror] ${err.message}`));
+  await p.goto(`chrome-extension://${id}/scratch.html`, { waitUntil: "domcontentloaded" });
+  const f = await p.waitForFrame((fr) => fr.url().includes("engine-frame.html"), {
+    timeout: 15_000,
+  });
+  const t = Date.now();
+  await f.waitForFunction("window.__nvim && window.__nvim.ready === true", {
+    timeout: bootTimeout,
+    polling: 250,
+  });
+  console.log(`[${label}] engine ready in ${((Date.now() - t) / 1000).toFixed(1)}s`);
+  return { page: p, frame: f };
 }
 
 async function exists(p) {
@@ -299,8 +406,129 @@ async function run(exec, headless, id) {
       }
     }
 
+    // ---- PHASE C: config loads (IndexedDB -> FS -> nvim at boot) -----------
+    // Simulate the options page having saved a config: write init.lua + enabled
+    // meta straight into the config store, open a fresh scratch page, and confirm
+    // nvim booted WITH the config by reading back an option the config set
+    // (tabstop = 7, default is 8). Proves the full IndexedDB -> config-boot path.
+    console.log("\n[PHASE C] config: writing init.lua (vim.o.tabstop = 7, enabled) to IndexedDB...");
+    await idbWriteConfig(page, "vim.o.tabstop = 7", true);
+    console.log("[PHASE C] opening a fresh scratch page to boot with the persisted config...");
+    const { page: pageC, frame: frameC } = await openScratchReady(browser, id, "PHASE C", BOOT_TIMEOUT_MS);
+    // Capture page errors for the rest of PHASE C so a "Buffer is not
+    // 'modifiable'" throw (the netrw-listing regression) is caught, not just
+    // logged. This assertion is what would have caught the milestone-4 bug.
+    const phaseCErrors = [];
+    pageC.on("pageerror", (err) => phaseCErrors.push(err.message));
+    const tabstopC = await frameC.evaluate(() =>
+      window.__nvim.request("nvim_get_option_value", ["tabstop", {}]),
+    );
+    const safeModeC = await frameC.evaluate(() => window.__nvim.safeMode);
+    console.log(`[PHASE C] tabstop -> ${JSON.stringify(tabstopC)}, safeMode -> ${safeModeC}`);
+    if (tabstopC !== 7) {
+      await browser.close();
+      return { ok: false, reason: `config did not load: tabstop is ${JSON.stringify(tabstopC)}, expected 7` };
+    }
+    if (safeModeC !== false) {
+      await browser.close();
+      return { ok: false, reason: `config booted but safeMode is ${safeModeC}, expected false` };
+    }
+
+    // Editability: under config boot the startup buffer must be a normal
+    // modifiable [No Name], NOT a nomodifiable netrw directory listing of `/`.
+    // Assert &modifiable is true, then actually type into the buffer and read it
+    // back — proving nvim_buf_set_lines / real input work (no "not modifiable").
+    const modifiableC = await frameC.evaluate(() =>
+      window.__nvim.request("nvim_get_option_value", ["modifiable", {}]),
+    );
+    console.log(`[PHASE C] modifiable -> ${JSON.stringify(modifiableC)}`);
+    if (modifiableC !== true) {
+      await browser.close();
+      return { ok: false, reason: `config buffer not editable: modifiable is ${JSON.stringify(modifiableC)}, expected true (netrw listing regression?)` };
+    }
+    await frameC.evaluate(() => window.__nvim.input("iconfig typed<Esc>"));
+    await wait(500);
+    const typedC = await frameC.evaluate(() => window.__nvim.getBufferText());
+    console.log(`[PHASE C] buffer after typing -> ${JSON.stringify(typedC)}`);
+    if (!typedC.includes("config typed")) {
+      await browser.close();
+      return { ok: false, reason: `config buffer not typeable: text after input is ${JSON.stringify(typedC)}, expected to contain "config typed"` };
+    }
+    // No "Buffer is not 'modifiable'" (or similar) throw during this phase.
+    const modErr = phaseCErrors.find((m) => /not ['"]?modifiable/i.test(m));
+    if (modErr) {
+      await browser.close();
+      return { ok: false, reason: `config boot raised a modifiable pageerror: ${JSON.stringify(modErr)}` };
+    }
+    console.log(`[PHASE C] pageerrors during phase: ${JSON.stringify(phaseCErrors)}`);
+    console.log("PHASE C: config loaded (tabstop=7), buffer editable (typed 'config typed'), no modifiable error");
+
+    // ---- PHASE D: safe mode recovers a broken config ----------------------
+    // Overwrite init.lua with a config that hangs nvim at boot (infinite loop),
+    // then open a fresh scratch page. The config boot must time out (12s
+    // watchdog), dispose the wedged engine, and boot a CLEAN one:
+    // __nvim.ready true, __nvim.safeMode true, and the hanging config's tabstop
+    // change must NOT have applied (default 8).
+    console.log("\n[PHASE D] safe mode: overwriting init.lua with a HANGING config (while true do end)...");
+    await idbWriteConfig(pageC, "while true do end", true);
+    console.log("[PHASE D] opening a fresh scratch page; config boot hangs then a clean retry boots (allow ~90s)...");
+    const { page: pageD, frame: frameD } = await openScratchReady(browser, id, "PHASE D", SAFE_MODE_TIMEOUT_MS);
+    // Read all three signals in one page-side evaluate, racing the (worker-bound)
+    // tabstop request against an in-page timeout so a wedged worker can never hang
+    // the CDP call itself.
+    const stateD = await frameD.evaluate(async () => {
+      const ready = window.__nvim.ready;
+      const safeMode = window.__nvim.safeMode;
+      let tabstop = null;
+      let tabstopError = null;
+      try {
+        tabstop = await Promise.race([
+          window.__nvim.request("nvim_get_option_value", ["tabstop", {}]),
+          new Promise((_r, rej) => setTimeout(() => rej(new Error("request timed out")), 8000)),
+        ]);
+      } catch (e) {
+        tabstopError = e && e.message ? e.message : String(e);
+      }
+      return { ready, safeMode, tabstop, tabstopError };
+    });
+    const readyD = stateD.ready;
+    const safeModeD = stateD.safeMode;
+    const tabstopD = stateD.tabstop;
+    console.log(
+      `[PHASE D] ready -> ${readyD}, safeMode -> ${safeModeD}, tabstop -> ${JSON.stringify(tabstopD)}` +
+        (stateD.tabstopError ? ` (tabstop request error: ${stateD.tabstopError})` : ""),
+    );
+
+    // CLEANUP FIRST: whatever the asserts do, never leave a broken config that
+    // could poison a rerun or a subsequent overlay-smoke run.
+    console.log("[PHASE D] cleanup: deleting init.lua + disabling config in IndexedDB...");
+    await idbClearConfig(pageD).catch((e) => console.log(`[PHASE D] cleanup warn: ${errText(e)}`));
+
+    if (readyD !== true) {
+      await browser.close();
+      return { ok: false, reason: `safe mode: engine not ready after broken config (ready=${readyD})` };
+    }
+    if (safeModeD !== true) {
+      await browser.close();
+      return { ok: false, reason: `safe mode: safeMode is ${safeModeD}, expected true after broken config` };
+    }
+    if (tabstopD !== 8) {
+      await browser.close();
+      return { ok: false, reason: `safe mode: tabstop is ${JSON.stringify(tabstopD)}, expected default 8 (broken config must not apply)` };
+    }
+    console.log("PHASE D: safe-mode recovered");
+
     await browser.close();
-    return { ok: true, lastIdle, wakeupLog, idleSamples, persisted: true, clipboard };
+    return {
+      ok: true,
+      lastIdle,
+      wakeupLog,
+      idleSamples,
+      persisted: true,
+      clipboard,
+      configLoaded: true,
+      safeModeRecovered: true,
+    };
   } catch (e) {
     await browser.close().catch(() => {});
     return { ok: false, reason: e instanceof Error ? (e.stack ?? e.message) : String(e) };
@@ -341,10 +569,13 @@ async function main() {
   console.log(`\nlast idle wakeups/sec: ${result.lastIdle} (gate <= ${IDLE_GATE})`);
   console.log(`persistence across reload: ${result.persisted ? "PASS" : "FAIL"}`);
   console.log(`clipboard copy: ${result.clipboard}`);
+  console.log(`config loads (PHASE C): ${result.configLoaded ? "PASS" : "FAIL"}`);
+  console.log(`safe mode recovers (PHASE D): ${result.safeModeRecovered ? "PASS" : "FAIL"}`);
   console.log(
     "\nPASS: engine booted in-browser, buffer round-tripped, idle CPU parked, " +
       "draft persisted across reload" +
-      (result.clipboard.startsWith("verified") ? ", clipboard copy verified" : " (clipboard soft-skipped)"),
+      (result.clipboard.startsWith("verified") ? ", clipboard copy verified" : " (clipboard soft-skipped)") +
+      ", config loaded from IndexedDB (tabstop=7), safe mode recovered a broken config",
   );
   process.exit(0);
 }

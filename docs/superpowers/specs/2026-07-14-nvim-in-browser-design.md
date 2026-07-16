@@ -308,6 +308,19 @@ Layered, TDD throughout:
    `filetypeForHost` unit test. See "Milestone 3 implementation notes" below.
 4. **Config & plugins:** virtual FS persistence, options page (editor / URL
    fetch / folder upload), plugin fetcher, per-site filetype rules.
+   ✅ **Core done 2026-07-16** — the user's `init.lua` persists to IndexedDB
+   (config store, DB v2), loads into the worker FS at boot, and is applied by
+   real Neovim; an options page edits/fetches the config and toggles it on/off;
+   a broken or hanging config auto-recovers into **safe mode** (12s boot
+   watchdog → clean reboot). Browser-verified end-to-end
+   (`scripts/browser-smoke.mjs` PHASE C config-loads: `tabstop=7` read back
+   after a reload; PHASE D safe-mode: hanging config → engine still boots,
+   `safeMode` true, default option preserved).
+   **Deferred follow-up:** the plugin fetcher (staging pure-Lua plugins onto
+   `packpath`) and multi-file / folder config upload — the options editor is a
+   single-`init.lua` textarea + URL fetch for now. Process/network plugins and
+   plugin managers remain out of scope (WASM sandbox: no subprocess, no host
+   network from Lua).
 5. **Hardening:** resource lifecycle, watchdog, safe mode, fidelity suite
    expansion, performance gates.
 

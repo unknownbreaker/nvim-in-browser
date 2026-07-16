@@ -1,7 +1,12 @@
 // IndexedDB-backed persistence for the scratch page's single draft. The store
-// holds one document under key "scratch". The IndexedDB round-trip is exercised
-// by scripts/browser-smoke.mjs (reload-persistence assertion); only the pure
+// holds one document under key "scratch" in the shared "docs" store (see
+// ../storage/idb). The IndexedDB round-trip is exercised by
+// scripts/browser-smoke.mjs (reload-persistence assertion); only the pure
 // serializeError helper is unit-tested (vitest's node env has no IndexedDB).
+import { openDb, serializeError } from "../storage/idb";
+
+export { serializeError } from "../storage/idb";
+
 export interface ScratchStore {
   load(): Promise<string | null>;
   save(text: string): Promise<void>;
@@ -10,31 +15,9 @@ export interface ScratchStore {
 const STORE = "docs";
 const KEY = "scratch";
 
-export function serializeError(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  if (e && typeof e === "object" && "message" in e) {
-    const name = "name" in e ? `${(e as { name: unknown }).name}: ` : "";
-    return `${name}${(e as { message: unknown }).message}`;
-  }
-  return String(e);
-}
-
-function openDb(dbName: string): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(dbName, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(new Error(serializeError(req.error)));
-    req.onblocked = () => reject(new Error("scratch store open blocked"));
-  });
-}
-
-export function openScratchStore(dbName = "nvim-in-browser"): ScratchStore {
+export function openScratchStore(): ScratchStore {
   const tx = async <T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest): Promise<T> => {
-    const db = await openDb(dbName);
+    const db = await openDb();
     try {
       return await new Promise<T>((resolve, reject) => {
         const store = db.transaction(STORE, mode).objectStore(STORE);

@@ -9,6 +9,7 @@
 //           text back on change (debounced) plus deactivate/ready signals.
 import { NvimClient } from "../engine/client";
 import { openScratchStore, serializeError } from "../scratch/scratch-store";
+import { openConfigStore } from "../storage/config-store";
 import { GridRenderer } from "../ui/grid-renderer";
 import { isEscapeChord, keyEventToNvim } from "../ui/keymap";
 
@@ -21,17 +22,27 @@ const canvas = document.getElementById("grid") as HTMLCanvasElement;
 // `document`, so the normal keymap path is unaffected for non-composition keys.
 const ime = document.getElementById("ime") as HTMLInputElement;
 const renderer = new GridRenderer(canvas);
-const client = new NvimClient(
-  chrome.runtime.getURL("engine-worker.js"),
-  chrome.runtime.getURL("nvim-asyncify.wasm"),
-  chrome.runtime.getURL("nvim-runtime.tar.gz"),
-);
+// Build a fresh engine client. Factored out so the safe-mode fallback can
+// replace a wedged config client with an identically-constructed clean one.
+function makeClient(): NvimClient {
+  return new NvimClient(
+    chrome.runtime.getURL("engine-worker.js"),
+    chrome.runtime.getURL("nvim-asyncify.wasm"),
+    chrome.runtime.getURL("nvim-runtime.tar.gz"),
+  );
+}
+// Reassignable: bootWithSafeMode swaps in a fresh client on config-boot failure.
+// All code references the current binding, so the swap is transparent.
+let client = makeClient();
 
 // Small, generic automation/debugging hook. Exposed on window so a headless
 // browser (or DevTools) can observe readiness, read the buffer, drive input,
 // and watch idle poll wake-ups without reaching into module internals.
 const debug = {
   ready: false,
+  // True once a config boot failed and the frame fell back to a clean engine.
+  // Stays false for clean boots and successful config boots. Read by smokes.
+  safeMode: false,
   wakeupsPerSecond: 0,
   getBufferText: (): Promise<string> => currentText(),
   input: (keys: string): void => client.input(keys),
@@ -51,16 +62,6 @@ let cachedFinalText: string | null = null;
 // which leaves the embed-only `nvim-text` post as the sole change reaction.
 let scratchOnChange: (() => void) | null = null;
 
-client.onRedraw = (batch) => {
-  renderer.apply(batch);
-  // Park the hidden IME input at the caret so the composition candidate window
-  // appears where the user is typing.
-  const p = renderer.cursorPixel();
-  ime.style.left = `${p.x}px`;
-  ime.style.top = `${p.y}px`;
-  ime.style.height = `${p.height}px`;
-};
-
 // IME composition: while composing, keydown events feed the input (and are
 // suppressed in the document handler below). On compositionend, forward the
 // finished text to nvim as literal input and reset the field.
@@ -79,17 +80,11 @@ ime.addEventListener("compositionend", (ev) => {
 ime.addEventListener("input", () => {
   if (!composing) ime.value = "";
 });
-client.onStat = (wps) => {
-  debug.wakeupsPerSecond = wps;
-  console.log(`[nvim] poll wakeups/sec: ${wps}`);
-};
 // Engine gone (clean exit or post-boot fatal): post the last known text. On
 // null the parent keeps the field's last synced value, so this never regresses.
 const postDeactivateFinal = (): void => {
   parent.postMessage({ type: "nvim-deactivate", text: cachedFinalText }, "*");
 };
-client.onExit = postDeactivateFinal;
-client.onFatal = postDeactivateFinal;
 
 const { cols, rows } = renderer.gridForSize(innerWidth, innerHeight);
 
@@ -135,30 +130,161 @@ async function deactivate(): Promise<void> {
 // (see the autocmd installed in init()). Debounce buffer pulls so a burst of
 // keystrokes yields a single nvim_buf_get_lines + postMessage.
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
-client.onEvent = (method, args) => {
-  if (method === "wasm_text_final") {
-    // VimLeavePre payload: the whole buffer joined by "\n". Cache it so
-    // onExit/onFatal can relay it even if no debounce flush has run.
-    if (typeof args[0] === "string") cachedFinalText = args[0];
+
+// Attach every worker-event handler to a client. Factored out so the initial
+// client and any safe-mode replacement client are wired identically; each
+// handler closes over the shared module state (renderer, ime, debug,
+// currentText, syncTimer, scratchOnChange, cachedFinalText). Keep this the sole
+// definition of these handlers so the two clients can never drift.
+function wireClient(c: NvimClient): void {
+  c.onRedraw = (batch) => {
+    renderer.apply(batch);
+    // Park the hidden IME input at the caret so the composition candidate window
+    // appears where the user is typing.
+    const p = renderer.cursorPixel();
+    ime.style.left = `${p.x}px`;
+    ime.style.top = `${p.y}px`;
+    ime.style.height = `${p.height}px`;
+  };
+  c.onStat = (wps) => {
+    debug.wakeupsPerSecond = wps;
+    console.log(`[nvim] poll wakeups/sec: ${wps}`);
+  };
+  c.onExit = postDeactivateFinal;
+  c.onFatal = postDeactivateFinal;
+  c.onEvent = (method, args) => {
+    if (method === "wasm_text_final") {
+      // VimLeavePre payload: the whole buffer joined by "\n". Cache it so
+      // onExit/onFatal can relay it even if no debounce flush has run.
+      if (typeof args[0] === "string") cachedFinalText = args[0];
+      return;
+    }
+    if (method === "clipboard_copy") {
+      // A `+`/`*` yank fired: mirror v:event.regcontents (a list of lines, each a
+      // Uint8Array or string) out to the system clipboard. Runs in both modes.
+      const lines = (args[0] as unknown[]).map(decodeLine);
+      void navigator.clipboard.writeText(lines.join("\n")).catch((e) =>
+        console.warn("[clipboard] write failed:", serializeError(e)),
+      );
+      return;
+    }
+    if (method !== "wasm_text_changed") return;
+    if (syncTimer !== null) clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+      syncTimer = null;
+      void currentText().then((text) => parent.postMessage({ type: "nvim-text", text }, "*"));
+    }, 300);
+    if (scratchOnChange) scratchOnChange();
+  };
+}
+
+// Wire the initial client. A safe-mode retry re-runs wireClient on its fresh
+// client, so this must run before any client.start.
+wireClient(client);
+
+// Resolve how to boot nvim from the persisted user config. When the config is
+// enabled and carries a non-empty init.lua, return the argv that lets nvim read
+// $XDG_CONFIG_HOME/nvim/init.lua (dropping `-u NORC --noplugin`) plus every
+// config file staged into the worker FS under /home/.config/nvim. Any IndexedDB
+// failure degrades to a clean boot — persistence problems must never keep the
+// editor from starting.
+async function resolveBoot(): Promise<{
+  argv?: string[];
+  configFiles?: { path: string; data: Uint8Array }[];
+  usedConfig: boolean;
+}> {
+  try {
+    const store = openConfigStore();
+    const [meta, files] = await Promise.all([store.getMeta(), store.loadFiles()]);
+    const initLua = files["init.lua"];
+    if (meta.enabled && typeof initLua === "string" && initLua.trim().length > 0) {
+      const encoder = new TextEncoder();
+      const configFiles = Object.entries(files).map(([relpath, content]) => ({
+        path: "/home/.config/nvim/" + relpath,
+        data: encoder.encode(content),
+      }));
+      // `--cmd` runs BEFORE plugins/init load, so netrw's load-guard skips it.
+      // Without this, nvim's WASI cwd is `/` (a directory), so the startup
+      // buffer becomes a netrw directory listing — nomodifiable+readonly — which
+      // breaks scratch-restore and overlay text-seed (nvim_buf_set_lines fails
+      // with "Buffer is not 'modifiable'"). netrw is non-functional in this
+      // sandbox anyway. The clean/default boot (NVIM_ARGV, with --noplugin)
+      // already excludes netrw, so this only affects config boots.
+      return {
+        argv: [
+          "nvim",
+          "--cmd",
+          "let g:loaded_netrw=1 | let g:loaded_netrwPlugin=1",
+          "--embed",
+          "-i",
+          "NONE",
+          "-n",
+        ],
+        configFiles,
+        usedConfig: true,
+      };
+    }
+  } catch (e) {
+    console.warn("[config] load failed, booting without config:", serializeError(e));
+  }
+  return { usedConfig: false };
+}
+
+// One-line in-frame notice that the config didn't load. Cheap and best-effort;
+// debug.safeMode is the authoritative signal for smokes.
+function showSafeModeBanner(): void {
+  const banner = document.createElement("div");
+  banner.textContent = "⚠ config failed — started in safe mode";
+  banner.style.cssText =
+    "position:fixed;top:0;left:0;right:0;z-index:9999;padding:4px 8px;" +
+    "font:12px system-ui,sans-serif;color:#000;background:#f5c518;text-align:center;";
+  document.body.appendChild(banner);
+}
+
+// Boot nvim, falling back to a clean "safe mode" if the user config fails. A
+// broken config can either reject start() (a pre-ready fatal) or hang forever
+// (never resolving nvim_ui_attach), so the config boot races a 12s timeout. On
+// either failure the config client is disposed and a fresh one boots with no
+// config, so the editor always comes up. The fresh client becomes the module
+// `client`, so installBufferHooks/seed/etc. run against whichever boot won.
+async function bootWithSafeMode(cols: number, rows: number): Promise<void> {
+  const boot = await resolveBoot();
+  if (!boot.usedConfig) {
+    await client.start(cols, rows);
     return;
   }
-  if (method === "clipboard_copy") {
-    // A `+`/`*` yank fired: mirror v:event.regcontents (a list of lines, each a
-    // Uint8Array or string) out to the system clipboard. Runs in both modes.
-    const lines = (args[0] as unknown[]).map(decodeLine);
-    void navigator.clipboard.writeText(lines.join("\n")).catch((e) =>
-      console.warn("[clipboard] write failed:", serializeError(e)),
-    );
-    return;
+  // Captured so the success path can clear the watchdog — otherwise a leaked 12s
+  // closure fires on every successful config boot (harmless but wasteful).
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error("config boot timed out")), 12_000);
+    });
+    await Promise.race([
+      (async () => {
+        await client.start(cols, rows, { argv: boot.argv, configFiles: boot.configFiles });
+        // A broken config can wedge nvim AFTER nvim_ui_attach resolves — e.g. an
+        // init.lua that loops once startup finishes attaching the UI. start()
+        // would still resolve, so prove the RPC channel is actually live with a
+        // trivial round-trip; a post-attach hang then trips the same watchdog and
+        // falls back to safe mode rather than leaving the editor silently wedged.
+        await client.request("nvim_eval", ["1"]);
+      })(),
+      timeout,
+    ]);
+    clearTimeout(timeoutHandle);
+    debug.safeMode = false;
+  } catch (e) {
+    clearTimeout(timeoutHandle);
+    console.warn("config failed to load; started in safe mode:", serializeError(e));
+    client.dispose();
+    client = makeClient();
+    wireClient(client);
+    await client.start(cols, rows);
+    debug.safeMode = true;
+    showSafeModeBanner();
   }
-  if (method !== "wasm_text_changed") return;
-  if (syncTimer !== null) clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => {
-    syncTimer = null;
-    void currentText().then((text) => parent.postMessage({ type: "nvim-text", text }, "*"));
-  }, 300);
-  if (scratchOnChange) scratchOnChange();
-};
+}
 
 // Query the RPC channel id from nvim (rather than assuming the embed channel is
 // always 1) and install the buffer autocmds that push edits back over it. Shared
@@ -224,7 +350,7 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("focus", () => void syncClipboardIn());
 
 async function init(seedText: unknown, filetype?: unknown): Promise<void> {
-  await client.start(cols, rows);
+  await bootWithSafeMode(cols, rows);
   debug.ready = true;
   if (typeof seedText === "string" && seedText.length > 0) {
     await client.request("nvim_buf_set_lines", [0, 0, -1, false, seedText.split("\n")]);
@@ -258,7 +384,7 @@ async function startScratch(): Promise<void> {
   } catch (e) {
     console.warn("[scratch] load failed, starting empty:", serializeError(e));
   }
-  await client.start(cols, rows);
+  await bootWithSafeMode(cols, rows);
   debug.ready = true;
   const channel = await installBufferHooks();
   void syncClipboardIn();

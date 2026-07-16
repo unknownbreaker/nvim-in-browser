@@ -166,10 +166,28 @@ function wtf8Length(memory: WebAssembly.Memory, ptr: number, len: number): numbe
   return bytes;
 }
 
+// Write a config file into the in-memory WASI tree at an absolute path,
+// creating any missing parent directories. Mirrors makeHome's dir-walk exactly
+// (reuse-or-create Directory per segment), overwriting an existing leaf.
+function writeConfigFile(root: Map<string, Inode>, path: string, data: Uint8Array): void {
+  if (!path.startsWith("/")) return; // only absolute WASI paths
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length === 0) return;
+  let cur = root;
+  for (const seg of parts.slice(0, -1)) {
+    const existing = cur.get(seg);
+    const dir = existing instanceof Directory ? existing : new Directory(new Map());
+    if (dir !== existing) cur.set(seg, dir);
+    cur = dir.contents;
+  }
+  cur.set(parts[parts.length - 1], new File(data));
+}
+
 export async function startNvimHost(
   wasmBytes: BufferSource,
   runtimeEntries: TarEntry[],
   cb: NvimHostCallbacks,
+  opts?: { argv?: string[]; configFiles?: { path: string; data: Uint8Array }[] },
 ): Promise<NvimHost> {
   const stdinQueue: Uint8Array[] = [];
   let stdinWaker: (() => void) | null = null;
@@ -231,6 +249,11 @@ export async function startNvimHost(
   const root = buildTree(runtimeEntries);
   root.set("tmp", new Directory(new Map()));
   root.set("home", makeHome());
+  // User config files (if any) land in the tree BEFORE instantiation so nvim's
+  // startup sees them. Absent opts.configFiles, the tree is byte-for-byte as before.
+  for (const entry of opts?.configFiles ?? []) {
+    writeConfigFile(root, entry.path, entry.data);
+  }
 
   const fds: Fd[] = [
     new StdinFd(),
@@ -238,7 +261,8 @@ export async function startNvimHost(
     new StderrFd(),
     new PreopenDirectory("/", root),
   ];
-  const wasiInst = new WASI([...NVIM_ARGV], [...NVIM_ENV], fds, { debug: false });
+  const argv = opts?.argv ?? NVIM_ARGV;
+  const wasiInst = new WASI([...argv], [...NVIM_ENV], fds, { debug: false });
 
   function parseSubs(inPtr: number, nsubs: number): NormalizedSub[] {
     const dv = view();

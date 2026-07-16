@@ -29,6 +29,37 @@ Design: [docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md](docs/super
    (no focused text field, or focus is trapped in a cross-origin iframe) it
    shows a dismissible fallback notice offering the scratch page instead.
 
+## Options / config
+
+The extension boots real Neovim with **your** `init.lua`.
+
+- **Open the options page:** `chrome://extensions` → find nvim-in-browser →
+  **Details** → **Extension options** (or right-click the toolbar icon →
+  **Options**).
+- **Edit your config:** type/paste `init.lua` into the editor, or use
+  **Fetch from URL** to pull an `init.lua` from a raw URL. Save it — it is
+  stored in IndexedDB (mapped to `~/.config/nvim/`).
+- **It loads on the next editor boot:** reload the scratch tab, or re-activate
+  the overlay (`Ctrl+Shift+E`). Neovim starts with your config applied.
+- **The "Enable config" toggle** boots clean (no user config) when off — a
+  quick way to bypass your config without deleting it.
+- **A broken config auto-recovers into safe mode.** If your config errors or
+  hangs at boot, a 12s watchdog disposes the wedged engine and reboots a clean
+  one, so the editor always comes up (a banner notes the fallback). Fix the
+  config and reload to try again.
+
+**Sandbox limits.** This is Neovim compiled to WebAssembly in a browser, with
+no subprocesses and no host network from Lua. So:
+
+- **Works:** pure-Lua / Vimscript config, `set`/option tweaks, keymaps,
+  autocmds, and pure-Lua plugins (no external processes).
+- **Does NOT work:** plugins that spawn processes or open sockets (LSP servers,
+  Telescope's `ripgrep`, `git` integrations, Treesitter parser compilation,
+  Mason, etc.), and plugin managers (lazy.nvim / packer) that clone from the
+  network.
+- **Plugin bundling** (staging pure-Lua plugins into the config FS) is a
+  planned follow-up; today only files you save via the options page are loaded.
+
 Verification: `npm test` (unit), `node scripts/smoke-nvim.mjs` (engine in
 Node), `node scripts/browser-smoke.mjs` and `node scripts/overlay-smoke.mjs`
 (real Chrome; needs Chrome for Testing via
