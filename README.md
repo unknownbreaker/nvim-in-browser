@@ -49,13 +49,23 @@ The extension boots real Neovim with **your** `init.lua`.
 - **Open the options page:** `chrome://extensions` → find nvim-in-browser →
   **Details** → **Extension options** (or right-click the toolbar icon →
   **Options**).
-- **Edit your config:** type/paste `init.lua` into the editor, or use
-  **Fetch from URL** to pull an `init.lua` from a raw URL. Save it — it is
-  stored in IndexedDB (mapped to `~/.config/nvim/`).
+- **Edit your config:** the multi-file editor manages your whole
+  `~/.config/nvim/` tree — add files (e.g. `lua/opts.lua`), rename/delete them,
+  and edit each in place, not just a single `init.lua`. You can **Fetch to
+  init.lua** from a raw URL, or **import a config folder** from disk. Save —
+  everything is stored in IndexedDB (mapped to `~/.config/nvim/`).
+- **Install plugins:** add a pure-Lua / Vimscript plugin by GitHub
+  **`owner/repo`** (optionally pinning a ref; default `main`) — no extra
+  permissions, it fetches over the public GitHub API — or **upload a plugin
+  folder** from disk. Installed plugins stage into `pack/plugins/start` and
+  auto-load on boot; each has a per-plugin **enable/disable** toggle so you can
+  keep one installed but off.
 - **It loads on the next editor boot:** reload the scratch tab, or re-activate
-  the overlay (`Ctrl+Shift+E`). Neovim starts with your config applied.
-- **The "Enable config" toggle** boots clean (no user config) when off — a
-  quick way to bypass your config without deleting it.
+  the overlay (`Ctrl+Shift+E`). Neovim starts with your config and enabled
+  plugins applied.
+- **The "Load my config on boot" checkbox is the master switch.** Unchecked, it
+  boots a stock Neovim that ignores **both** your saved config and your plugins
+  — a quick way to bypass everything without deleting it.
 - **A broken config auto-recovers into safe mode.** If your config errors or
   hangs at boot, a 12s watchdog disposes the wedged engine and reboots a clean
   one, so the editor always comes up (a banner notes the fallback). Fix the
@@ -70,8 +80,11 @@ no subprocesses and no host network from Lua. So:
   Telescope's `ripgrep`, `git` integrations, Treesitter parser compilation,
   Mason, etc.), and plugin managers (lazy.nvim / packer) that clone from the
   network.
-- **Plugin bundling** (staging pure-Lua plugins into the config FS) is a
-  planned follow-up; today only files you save via the options page are loaded.
+- **Installing plugins** works for pure-Lua / Vimscript plugins: add them by
+  GitHub `owner/repo` (no extra permissions) or a folder upload, and toggle each
+  on/off, via the options page (see "Options / config" above). The same sandbox
+  limits apply — a plugin that spawns a process or opens a socket still won't
+  run.
 
 **Hardening.** The editor reclaims resources and guards against runaway configs:
 
