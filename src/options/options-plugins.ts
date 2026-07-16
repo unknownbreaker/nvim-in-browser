@@ -5,9 +5,11 @@
 // plugin-store + github-fetch + folder-upload units.
 import { openPluginStore, isSafePluginName, type PluginRecord } from "../storage/plugin-store";
 import { fetchGithubPlugin, GithubFetchError } from "../plugins/github-fetch";
+import { openTokenStore } from "../storage/token-store";
 import { readFolderUpload } from "./folder-upload";
 
 const store = openPluginStore();
+const tokenStore = openTokenStore();
 
 function el<T extends Element>(id: string): T {
   const node = document.getElementById(id);
@@ -25,9 +27,11 @@ function fetchErrorMessage(err: unknown): string {
   if (err instanceof GithubFetchError) {
     switch (err.kind) {
       case "repo-not-found":
-        return "Repo or ref not found — check owner/repo and the ref.";
+        return "Repo or ref not found — check owner/repo and the ref (a private repo needs a token with access).";
+      case "unauthorized":
+        return "GitHub rejected your token — make sure it's valid, not expired, and has access to this repo.";
       case "rate-limited":
-        return "GitHub rate limit hit (60/hr, unauthenticated). Try again later.";
+        return "GitHub rate limit hit. Save a personal access token below to raise it (60/hr → 5,000/hr).";
       case "too-large":
         return "Plugin exceeds the 200-file / 5 MB limit.";
       case "network":
@@ -131,7 +135,8 @@ async function onRefresh(p: PluginRecord): Promise<void> {
   if (!p.repo || !p.ref) return;
   status(`Refreshing ${p.name}…`, "info");
   try {
-    const { files } = await fetchGithubPlugin(p.repo, p.ref);
+    const token = (await tokenStore.get()) ?? undefined;
+    const { files } = await fetchGithubPlugin(p.repo, p.ref, { token });
     await store.add({ ...p, files, addedAt: Date.now() });
     status(`Refreshed ${p.name} (${files.length} files). (reload your editor)`, "ok");
     await render();
@@ -160,7 +165,8 @@ async function onAddGithub(): Promise<void> {
       status(`A plugin named "${name}" is already installed — remove or refresh it first.`, "err");
       return;
     }
-    const { files } = await fetchGithubPlugin(repo, ref);
+    const token = (await tokenStore.get()) ?? undefined;
+    const { files } = await fetchGithubPlugin(repo, ref, { token });
     if (files.length === 0) {
       status(`No .lua/.vim files found in ${repo}@${ref}.`, "err");
       return;
@@ -207,10 +213,53 @@ async function onUploadFolder(input: HTMLInputElement): Promise<void> {
   }
 }
 
+// --- GitHub token (isolated secrets DB; never staged into the editor FS) -----
+// The field is never populated with the stored token — we only report whether
+// one is saved, so the secret is not rendered back into the DOM.
+async function refreshTokenStatus(): Promise<void> {
+  const label = el<HTMLSpanElement>("gh-token-status");
+  try {
+    label.textContent = (await tokenStore.has()) ? "✓ token saved" : "no token saved";
+  } catch {
+    label.textContent = "";
+  }
+}
+
+async function onSaveToken(): Promise<void> {
+  const input = el<HTMLInputElement>("gh-token");
+  const value = input.value.trim();
+  if (!value) {
+    status("Enter a token, or use Clear to remove the saved one.", "info");
+    return;
+  }
+  try {
+    await tokenStore.set(value);
+    input.value = "";
+    status("GitHub token saved.", "ok");
+    await refreshTokenStatus();
+  } catch (err) {
+    status(`Failed to save token: ${err instanceof Error ? err.message : String(err)}`, "err");
+  }
+}
+
+async function onClearToken(): Promise<void> {
+  try {
+    await tokenStore.clear();
+    el<HTMLInputElement>("gh-token").value = "";
+    status("GitHub token cleared.", "ok");
+    await refreshTokenStatus();
+  } catch (err) {
+    status(`Failed to clear token: ${err instanceof Error ? err.message : String(err)}`, "err");
+  }
+}
+
 export function initPluginsUI(): void {
   el<HTMLButtonElement>("plugin-add").addEventListener("click", () => void onAddGithub());
   el<HTMLInputElement>("plugin-folder").addEventListener("change", (e) =>
     void onUploadFolder(e.target as HTMLInputElement),
   );
+  el<HTMLButtonElement>("gh-token-save").addEventListener("click", () => void onSaveToken());
+  el<HTMLButtonElement>("gh-token-clear").addEventListener("click", () => void onClearToken());
+  void refreshTokenStatus();
   void render();
 }

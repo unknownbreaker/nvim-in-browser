@@ -60,6 +60,14 @@ The extension boots real Neovim with **your** `init.lua`.
   folder** from disk. Installed plugins stage into `pack/plugins/start` and
   auto-load on boot; each has a per-plugin **enable/disable** toggle so you can
   keep one installed but off.
+- **Optional GitHub token:** unauthenticated GitHub API calls are limited to
+  60/hr **per IP** (easily exhausted behind a shared/corporate/VPN address),
+  which shows up as an install failure. Save a **personal access token** in the
+  Plugins section to raise that to 5,000/hr and to install from your **private**
+  repos. A fine-grained, read-only token is enough (`Contents: read` only for
+  the private repos you install). The token is kept in a **separate local
+  database** — never written into your config or the editor, never included in a
+  config export, and sent only to GitHub over HTTPS.
 - **It loads on the next editor boot:** reload the scratch tab, or re-activate
   the overlay (`Ctrl+Shift+E`). Neovim starts with your config and enabled
   plugins applied.
