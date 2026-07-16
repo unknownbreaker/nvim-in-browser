@@ -415,6 +415,11 @@ async function run(exec, headless, id) {
     await idbWriteConfig(page, "vim.o.tabstop = 7", true);
     console.log("[PHASE C] opening a fresh scratch page to boot with the persisted config...");
     const { page: pageC, frame: frameC } = await openScratchReady(browser, id, "PHASE C", BOOT_TIMEOUT_MS);
+    // Capture page errors for the rest of PHASE C so a "Buffer is not
+    // 'modifiable'" throw (the netrw-listing regression) is caught, not just
+    // logged. This assertion is what would have caught the milestone-4 bug.
+    const phaseCErrors = [];
+    pageC.on("pageerror", (err) => phaseCErrors.push(err.message));
     const tabstopC = await frameC.evaluate(() =>
       window.__nvim.request("nvim_get_option_value", ["tabstop", {}]),
     );
@@ -428,7 +433,35 @@ async function run(exec, headless, id) {
       await browser.close();
       return { ok: false, reason: `config booted but safeMode is ${safeModeC}, expected false` };
     }
-    console.log("PHASE C: config loaded (tabstop=7)");
+
+    // Editability: under config boot the startup buffer must be a normal
+    // modifiable [No Name], NOT a nomodifiable netrw directory listing of `/`.
+    // Assert &modifiable is true, then actually type into the buffer and read it
+    // back — proving nvim_buf_set_lines / real input work (no "not modifiable").
+    const modifiableC = await frameC.evaluate(() =>
+      window.__nvim.request("nvim_get_option_value", ["modifiable", {}]),
+    );
+    console.log(`[PHASE C] modifiable -> ${JSON.stringify(modifiableC)}`);
+    if (modifiableC !== true) {
+      await browser.close();
+      return { ok: false, reason: `config buffer not editable: modifiable is ${JSON.stringify(modifiableC)}, expected true (netrw listing regression?)` };
+    }
+    await frameC.evaluate(() => window.__nvim.input("iconfig typed<Esc>"));
+    await wait(500);
+    const typedC = await frameC.evaluate(() => window.__nvim.getBufferText());
+    console.log(`[PHASE C] buffer after typing -> ${JSON.stringify(typedC)}`);
+    if (!typedC.includes("config typed")) {
+      await browser.close();
+      return { ok: false, reason: `config buffer not typeable: text after input is ${JSON.stringify(typedC)}, expected to contain "config typed"` };
+    }
+    // No "Buffer is not 'modifiable'" (or similar) throw during this phase.
+    const modErr = phaseCErrors.find((m) => /not ['"]?modifiable/i.test(m));
+    if (modErr) {
+      await browser.close();
+      return { ok: false, reason: `config boot raised a modifiable pageerror: ${JSON.stringify(modErr)}` };
+    }
+    console.log(`[PHASE C] pageerrors during phase: ${JSON.stringify(phaseCErrors)}`);
+    console.log("PHASE C: config loaded (tabstop=7), buffer editable (typed 'config typed'), no modifiable error");
 
     // ---- PHASE D: safe mode recovers a broken config ----------------------
     // Overwrite init.lua with a config that hangs nvim at boot (infinite loop),

@@ -203,7 +203,26 @@ async function resolveBoot(): Promise<{
         path: "/home/.config/nvim/" + relpath,
         data: encoder.encode(content),
       }));
-      return { argv: ["nvim", "--embed", "-i", "NONE", "-n"], configFiles, usedConfig: true };
+      // `--cmd` runs BEFORE plugins/init load, so netrw's load-guard skips it.
+      // Without this, nvim's WASI cwd is `/` (a directory), so the startup
+      // buffer becomes a netrw directory listing — nomodifiable+readonly — which
+      // breaks scratch-restore and overlay text-seed (nvim_buf_set_lines fails
+      // with "Buffer is not 'modifiable'"). netrw is non-functional in this
+      // sandbox anyway. The clean/default boot (NVIM_ARGV, with --noplugin)
+      // already excludes netrw, so this only affects config boots.
+      return {
+        argv: [
+          "nvim",
+          "--cmd",
+          "let g:loaded_netrw=1 | let g:loaded_netrwPlugin=1",
+          "--embed",
+          "-i",
+          "NONE",
+          "-n",
+        ],
+        configFiles,
+        usedConfig: true,
+      };
     }
   } catch (e) {
     console.warn("[config] load failed, booting without config:", serializeError(e));
@@ -234,10 +253,13 @@ async function bootWithSafeMode(cols: number, rows: number): Promise<void> {
     await client.start(cols, rows);
     return;
   }
+  // Captured so the success path can clear the watchdog — otherwise a leaked 12s
+  // closure fires on every successful config boot (harmless but wasteful).
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   try {
-    const timeout = new Promise<never>((_resolve, reject) =>
-      setTimeout(() => reject(new Error("config boot timed out")), 12_000),
-    );
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error("config boot timed out")), 12_000);
+    });
     await Promise.race([
       (async () => {
         await client.start(cols, rows, { argv: boot.argv, configFiles: boot.configFiles });
@@ -250,8 +272,10 @@ async function bootWithSafeMode(cols: number, rows: number): Promise<void> {
       })(),
       timeout,
     ]);
+    clearTimeout(timeoutHandle);
     debug.safeMode = false;
   } catch (e) {
+    clearTimeout(timeoutHandle);
     console.warn("config failed to load; started in safe mode:", serializeError(e));
     client.dispose();
     client = makeClient();
