@@ -592,9 +592,12 @@ function installIdleLifecycle(store: ScratchStore): void {
       armIdleTimer?.();
     } catch (e) {
       // Respawn boot rejected (e.g. a transient RPC failure in installBufferHooks
-      // or the draft restore). Do NOT wedge: keep debug.sleeping true so the NEXT
-      // keydown/click re-enters here and retries, and update the overlay to say so.
-      // resuming is reset in finally, so the retry isn't blocked.
+      // or the draft restore). Terminate this failed worker before retrying, or
+      // each retry would orphan a live Worker (makeClient spawns one eagerly).
+      client.dispose();
+      // Do NOT wedge: keep debug.sleeping true so the NEXT keydown/click re-enters
+      // here and retries (which will makeClient() a fresh worker), and update the
+      // overlay to say so. resuming is reset in finally, so the retry isn't blocked.
       console.warn("[scratch] resume failed, will retry on next input:", serializeError(e));
       showSleepingOverlay("⚠ resume failed — press any key to retry");
     } finally {
