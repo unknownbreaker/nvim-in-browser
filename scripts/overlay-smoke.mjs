@@ -27,6 +27,9 @@
 //      engine-frame overlay and shows the fallback notice pill instead.
 //  11. Filetype: __nvim.request can set + read `&filetype` in-browser (the apply
 //      mechanism); the host->filetype mapping is unit-tested separately.
+//  12. Field-resize tracking: growing the textarea ELEMENT (fires no window
+//      "resize" event) grows the overlay to match, proving the
+//      ResizeObserver-on-target repositions/resizes the overlay.
 //
 // Browser + extension-load handling mirrors scripts/browser-smoke.mjs.
 //
@@ -478,6 +481,48 @@ async function run(exec, headless, id, baseUrl) {
     await sendEscapeChord(frame);
     await wait(600);
 
+    // ---- Case 8: overlay tracks the FIELD's own resize (ResizeObserver) ----
+    // Growing the textarea ELEMENT (not the window) must grow the overlay.
+    // Resizing a field fires no window "resize" event, so this proves the
+    // ResizeObserver-on-target path re-runs positionFrame and the overlay
+    // follows the field's box in both dimensions.
+    console.log("[resize] re-activating textarea for field-resize tracking...");
+    frame = await activateOn(page, "ta");
+    page.__fieldId = "ta";
+    // Size the field past the overlay's 480x220 minimums so the FIELD drives the
+    // overlay size, then grow it and confirm the overlay tracks the new box.
+    await page.evaluate(() => {
+      const ta = document.getElementById("ta");
+      ta.style.width = "560px";
+      ta.style.height = "300px";
+    });
+    await wait(200);
+    const preResize = await page.evaluate(() => {
+      const f = document.querySelector('iframe[src*="engine-frame.html"]').getBoundingClientRect();
+      return { h: f.height, w: f.width };
+    });
+    await page.evaluate(() => {
+      const ta = document.getElementById("ta");
+      ta.style.width = "720px";
+      ta.style.height = "560px";
+    });
+    await wait(200);
+    const postResize = await page.evaluate(() => {
+      const f = document.querySelector('iframe[src*="engine-frame.html"]').getBoundingClientRect();
+      const t = document.getElementById("ta").getBoundingClientRect();
+      return { fh: f.height, fw: f.width, th: t.height, tw: t.width };
+    });
+    console.log(`[resize] overlay before ${JSON.stringify(preResize)} after ${JSON.stringify(postResize)}`);
+    if (!(postResize.fh > preResize.h + 200))
+      return { ok: false, reason: `overlay did not grow with the field's height: before ${preResize.h} after ${postResize.fh}` };
+    if (Math.abs(postResize.fh - postResize.th) > 8)
+      return { ok: false, reason: `overlay height did not match field: overlay ${postResize.fh} field ${postResize.th}` };
+    if (Math.abs(postResize.fw - postResize.tw) > 8)
+      return { ok: false, reason: `overlay width did not match field: overlay ${postResize.fw} field ${postResize.tw}` };
+    console.log("[resize] ASSERT OK: overlay followed the field's own resize (size matched in both dimensions)");
+    await sendEscapeChord(frame);
+    await wait(600);
+
     await browser.close();
     return { ok: true };
   } catch (e) {
@@ -533,7 +578,7 @@ async function main() {
 
     console.log(
       "\nPASS: overlay activation, debounced sync, deactivate, input + password cases, " +
-        "IME composition, hostile-page notice, and filetype-apply mechanism",
+        "IME composition, hostile-page notice, filetype-apply mechanism, and field-resize tracking",
     );
   } finally {
     console.log("restoring production dist/chromium (test hooks disabled)...");
