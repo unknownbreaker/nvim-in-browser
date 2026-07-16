@@ -22,6 +22,12 @@ Design: [docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md](docs/super
    `Ctrl+Shift+Esc` closes the overlay (the chord always works, even if your
    config wedges the editor).
    Password fields are never touched.
+   IME/composition input works: compose CJK or accented text with your system
+   IME and the finished text lands in the buffer. On known sites the overlay
+   sets a filetype for syntax highlighting (GitHub / GitLab / Stack Overflow /
+   Reddit / Hacker News → `markdown`). If activation can't attach to a field
+   (no focused text field, or focus is trapped in a cross-origin iframe) it
+   shows a dismissible fallback notice offering the scratch page instead.
 
 Verification: `npm test` (unit), `node scripts/smoke-nvim.mjs` (engine in
 Node), `node scripts/browser-smoke.mjs` and `node scripts/overlay-smoke.mjs`

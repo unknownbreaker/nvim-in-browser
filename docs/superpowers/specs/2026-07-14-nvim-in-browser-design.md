@@ -298,6 +298,14 @@ Layered, TDD throughout:
    See "Milestone 2 implementation notes" below for the chosen approach.
 3. **Textarea/input overlay:** activation hotkey, sync semantics, escape chord,
    single-line input handling, hostile-page fallback.
+   ✅ **Done 2026-07-15** — the overlay attaches to textareas / text-like inputs,
+   live-syncs edits back through the native value setter, honours the escape
+   chord + `:q`, degrades gracefully on hostile pages (fallback notice + scratch
+   escape), supports IME/composition input, and sets a per-site filetype.
+   Browser-verified end-to-end (`scripts/overlay-smoke.mjs`: activation, live
+   sync, escape chord, single-line, password no-op, `:q` final-sync, IME
+   composition, hostile-page notice, filetype-apply mechanism) plus a
+   `filetypeForHost` unit test. See "Milestone 3 implementation notes" below.
 4. **Config & plugins:** virtual FS persistence, options page (editor / URL
    fetch / folder upload), plugin fetcher, per-site filetype rules.
 5. **Hardening:** resource lifecycle, watchdog, safe mode, fidelity suite
@@ -334,8 +342,14 @@ milestones should treat as current truth:
   genuinely ~0% with no timer-latency penalty. (The host retains the adaptive
   backoff path — tunable constants in nvim-host.ts — as a safety net for an
   engine that supplies only clock-poll subscriptions.)
-- **IME composition is NOT yet implemented** (composition keydowns are ignored
-  via the "Process" key). Required before real long-form non-ASCII writing.
+- **IME composition is implemented** (hidden caret-tracking input). The
+  engine-frame owns a hidden-but-focusable `#ime` input parked at the caret
+  pixel; the browser routes composition (and its candidate window) there.
+  Composition keydowns are suppressed on the document handler (`isComposing` /
+  keyCode 229) and the finished text is forwarded to nvim on `compositionend`.
+  Verified in `scripts/overlay-smoke.mjs` (accented Latin + CJK compositions
+  reach the buffer). Candidate-window positioning is best-effort — composition
+  correctness does not depend on it.
 - **Escape chord is double-guarded:** swallowed inside the frame AND at the
   page's capture phase; the page side also deactivates, and a 20s boot
   watchdog tears down the overlay if the engine never becomes ready.
@@ -380,6 +394,41 @@ should treat as current truth:
   `navigator.clipboard.readText()` from the engine-frame context asserts the
   yanked text reached the system clipboard; soft-skips with an honest log if a
   headless environment blocks clipboard reads despite the permission grant).
+
+## Milestone 3 implementation notes (2026-07-15)
+
+Milestone 3 shipped the textarea/input overlay. Deviations and specifics later
+milestones should treat as current truth:
+
+- **IME via a hidden caret-tracking input.** The engine-frame owns a hidden,
+  focusable `#ime` input parked at the caret pixel (`renderer.cursorPixel()` on
+  every redraw). Focus lives there so the browser routes composition and its
+  candidate window to it. `compositionend` forwards the finished `ev.data` to
+  nvim as literal insert-mode input; document-level composition keydowns are
+  suppressed (`isComposing` / keyCode 229) so nothing double-enters. Replaces
+  the Milestone 1 "composition NOT implemented" note.
+- **Hostile-page fallback = notice + scratch escape.** When activation can't
+  attach to an eligible field (nothing focused, or focus trapped in a
+  cross-origin iframe), the content script shows a dismissible, inline-styled
+  toast (`[data-nvim-notice]`) offering the scratch page — it never creates an
+  overlay it can't drive. Full cross-origin-iframe editing (needs `all_frames` +
+  a frame-coordination protocol) and automated copy-back from the scratch page
+  are **deferred** refinements; the notice + scratch escape is the M3 graceful
+  degradation.
+- **Per-site filetype.** `filetypeForHost` (`src/content/filetype.ts`, its own
+  dependency-free module so it unit-tests in Node) maps known hosts (GitHub /
+  GitLab / Stack Overflow / Stack Exchange / Reddit → `markdown`, plus
+  `news.ycombinator.com`) to a filetype passed in the `nvim-init` postMessage.
+  The engine-frame validates it against a strict `[a-z0-9._-]+` allowlist before
+  `setlocal filetype=` (the filetype is untrusted page-supplied input).
+- **Verification.** `scripts/overlay-smoke.mjs` asserts activation/positioning,
+  live debounced sync + synthetic input event, escape chord, single-line strip,
+  password no-op, `:q` VimLeavePre final-sync, IME composition (accented Latin +
+  CJK reach the buffer), hostile-page notice (no overlay + pill), and the
+  filetype-apply mechanism (`__nvim.request` sets + reads `&filetype`). Host →
+  filetype mapping is covered by the `filetypeForHost` unit test. A generic
+  `__nvim.request(method, params)` debug hook was added to the engine-frame for
+  the in-browser filetype assertion.
 
 ## Alternatives considered
 

@@ -35,6 +35,9 @@ const debug = {
   wakeupsPerSecond: 0,
   getBufferText: (): Promise<string> => currentText(),
   input: (keys: string): void => client.input(keys),
+  // Generic RPC passthrough so a headless smoke can query/mutate nvim state
+  // (e.g. read `&filetype`, or `setlocal filetype=...`) without module internals.
+  request: (method: string, params: unknown[]): Promise<unknown> => client.request(method, params),
 };
 (window as unknown as { __nvim: typeof debug }).__nvim = debug;
 

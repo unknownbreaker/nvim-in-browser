@@ -8,6 +8,7 @@
 // Bundled as an IIFE (see scripts/build.mjs) because content scripts cannot be
 // ES modules.
 import { isEscapeChord } from "../ui/keymap";
+import { filetypeForHost } from "./filetype";
 
 // Compile-time flag (see scripts/build.mjs). esbuild's `define` replaces this
 // with a literal `false` in production builds, so the entire test-hook
@@ -16,18 +17,6 @@ import { isEscapeChord } from "../ui/keymap";
 declare const __NVIM_TEST_HOOKS__: boolean;
 
 const ELIGIBLE_INPUT_TYPES = new Set(["text", "search", "url", "email", "tel"]);
-
-// Map the host page to a nvim filetype so syntax highlighting / treesitter
-// engage on sites whose text fields are known to hold a particular markup.
-// Exported so it can be unit-tested directly (the IIFE content bundle keeps it
-// internal — the symbol just isn't exposed on the global, which is fine).
-export function filetypeForHost(host: string): string | undefined {
-  const h = host.replace(/^www\./, "");
-  if (/(^|\.)(github|gitlab)\.com$/.test(h)) return "markdown";
-  if (/(^|\.)(stackoverflow|stackexchange|reddit)\.com$/.test(h)) return "markdown";
-  if (h === "news.ycombinator.com") return "markdown";
-  return undefined;
-}
 
 // How long we wait, after creating the engine-frame iframe, to hear back from
 // it (either "nvim-ready" once it boots, or a "nvim-text" sync) before giving
@@ -94,6 +83,8 @@ function showNotice(message: string, withScratchAction: boolean): void {
     noticeEl?.remove();
 
     const pill = document.createElement("div");
+    // Stable selector for the overlay smoke's hostile-notice assertion.
+    pill.dataset.nvimNotice = "1";
     noticeEl = pill;
     pill.style.cssText = [
       "position:fixed",
