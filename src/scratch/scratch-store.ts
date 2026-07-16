@@ -37,6 +37,13 @@ export function openScratchStore(docId?: string): ScratchStore {
       return typeof v === "string" ? v : null;
     },
     async save(text) {
+      // An empty buffer deletes this doc's draft rather than storing "" — so an
+      // untouched or cleared scratch tab leaves no orphan behind when closed
+      // (per-tab drafts are keyed by a URL uuid that's gone once the tab closes).
+      if (text.length === 0) {
+        await tx<undefined>("readwrite", (s) => s.delete(KEY));
+        return;
+      }
       await tx<IDBValidKey>("readwrite", (s) => s.put(text, KEY));
     },
   };
