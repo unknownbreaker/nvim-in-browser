@@ -184,7 +184,9 @@ function writeConfigFile(root: Map<string, Inode>, path: string, data: Uint8Arra
 }
 
 export async function startNvimHost(
-  wasmBytes: BufferSource,
+  // Either raw wasm bytes (compiled here — the Node smoke path) or an
+  // already-compiled module (the worker passes a cached one to skip recompiling).
+  wasm: WebAssembly.Module | BufferSource,
   runtimeEntries: TarEntry[],
   cb: NvimHostCallbacks,
   opts?: { argv?: string[]; configFiles?: { path: string; data: Uint8Array }[] },
@@ -404,7 +406,8 @@ export async function startNvimHost(
       wtf8Length(wasmExports.memory, ptr, len),
   };
 
-  const module = await WebAssembly.compile(wasmBytes);
+  const module =
+    wasm instanceof WebAssembly.Module ? wasm : await WebAssembly.compile(wasm);
   const instance = await WebAssembly.instantiate(module, {
     wasi_snapshot_preview1: wasiImport as WebAssembly.ModuleImports,
     env: envImport as unknown as WebAssembly.ModuleImports,

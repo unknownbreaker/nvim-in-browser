@@ -31,6 +31,9 @@ function makeClient(): NvimClient {
     chrome.runtime.getURL("engine-worker.js"),
     chrome.runtime.getURL("nvim-asyncify.wasm"),
     chrome.runtime.getURL("nvim-runtime.tar.gz"),
+    // Keys the worker's compiled-module cache so later boots skip the ~11 MB
+    // recompile. The version bumps on every release (new engine), invalidating it.
+    chrome.runtime.getManifest().version,
   );
 }
 // Reassignable: bootWithSafeMode swaps in a fresh client on config-boot failure.
