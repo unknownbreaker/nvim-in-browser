@@ -9,3 +9,11 @@ chrome.commands.onCommand.addListener((command, tab) => {
     void chrome.tabs.sendMessage(tab.id, { type: "nvim-activate" });
   }
 });
+
+// Content script -> background: the hostile-page fallback notice's "Open scratch
+// page" escape hatch. The content script can't open a tab itself, so it asks us.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "open-scratch") {
+    void chrome.tabs.create({ url: chrome.runtime.getURL("scratch.html") });
+  }
+});

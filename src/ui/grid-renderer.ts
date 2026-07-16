@@ -60,6 +60,13 @@ export class GridRenderer {
     };
   }
 
+  // Cursor top-left pixel + cell height in canvas CSS pixels. Used by the
+  // engine frame to park the hidden IME input at the caret so the composition
+  // candidate window renders in the right place.
+  cursorPixel(): { x: number; y: number; height: number } {
+    return { x: this.cursor.col * this.cellW, y: this.cursor.row * this.cellH, height: this.cellH };
+  }
+
   apply(batch: unknown[]): void {
     for (const entry of batch as [string, ...unknown[][]][]) {
       const [name, ...calls] = entry;

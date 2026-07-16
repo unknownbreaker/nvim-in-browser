@@ -16,6 +16,10 @@ const params = new URLSearchParams(location.search);
 const mode = params.get("mode") ?? "full";
 
 const canvas = document.getElementById("grid") as HTMLCanvasElement;
+// Hidden-but-focusable input that owns focus so the browser routes IME
+// composition (and its candidate window) here. keydown still bubbles to
+// `document`, so the normal keymap path is unaffected for non-composition keys.
+const ime = document.getElementById("ime") as HTMLInputElement;
 const renderer = new GridRenderer(canvas);
 const client = new NvimClient(
   chrome.runtime.getURL("engine-worker.js"),
@@ -31,6 +35,9 @@ const debug = {
   wakeupsPerSecond: 0,
   getBufferText: (): Promise<string> => currentText(),
   input: (keys: string): void => client.input(keys),
+  // Generic RPC passthrough so a headless smoke can query/mutate nvim state
+  // (e.g. read `&filetype`, or `setlocal filetype=...`) without module internals.
+  request: (method: string, params: unknown[]): Promise<unknown> => client.request(method, params),
 };
 (window as unknown as { __nvim: typeof debug }).__nvim = debug;
 
@@ -44,7 +51,34 @@ let cachedFinalText: string | null = null;
 // which leaves the embed-only `nvim-text` post as the sole change reaction.
 let scratchOnChange: (() => void) | null = null;
 
-client.onRedraw = (batch) => renderer.apply(batch);
+client.onRedraw = (batch) => {
+  renderer.apply(batch);
+  // Park the hidden IME input at the caret so the composition candidate window
+  // appears where the user is typing.
+  const p = renderer.cursorPixel();
+  ime.style.left = `${p.x}px`;
+  ime.style.top = `${p.y}px`;
+  ime.style.height = `${p.height}px`;
+};
+
+// IME composition: while composing, keydown events feed the input (and are
+// suppressed in the document handler below). On compositionend, forward the
+// finished text to nvim as literal input and reset the field.
+let composing = false;
+ime.addEventListener("compositionstart", () => {
+  composing = true;
+});
+ime.addEventListener("compositionend", (ev) => {
+  composing = false;
+  const text = (ev as CompositionEvent).data ?? "";
+  if (text) client.input(text);
+  ime.value = "";
+});
+// Guard: any stray text that lands outside composition is dropped so it can't
+// leak into nvim or accumulate in the input.
+ime.addEventListener("input", () => {
+  if (!composing) ime.value = "";
+});
 client.onStat = (wps) => {
   debug.wakeupsPerSecond = wps;
   console.log(`[nvim] poll wakeups/sec: ${wps}`);
@@ -65,6 +99,11 @@ document.addEventListener("keydown", (ev) => {
     void deactivate();
     return;
   }
+  // Keys that are feeding an active IME composition (isComposing) or the
+  // pre-composition sentinel (keyCode 229) must not be forwarded to nvim — the
+  // composed text arrives via compositionend instead. Checked after the escape
+  // chord so the chord always wins.
+  if (ev.isComposing || ev.keyCode === 229) return;
   const keys = keyEventToNvim(ev);
   if (keys !== null) {
     ev.preventDefault();
@@ -184,22 +223,28 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("focus", () => void syncClipboardIn());
 
-async function init(seedText: unknown): Promise<void> {
+async function init(seedText: unknown, filetype?: unknown): Promise<void> {
   await client.start(cols, rows);
   debug.ready = true;
   if (typeof seedText === "string" && seedText.length > 0) {
     await client.request("nvim_buf_set_lines", [0, 0, -1, false, seedText.split("\n")]);
   }
+  // SECURITY: the filetype comes from the parent page via postMessage, so it is
+  // untrusted. Validate it against a strict allowlist charset before letting it
+  // anywhere near an Ex command — never interpolate raw text into `setlocal`.
+  if (typeof filetype === "string" && /^[a-z0-9._-]+$/.test(filetype)) {
+    await client.request("nvim_exec2", ["setlocal filetype=" + filetype, {}]);
+  }
   await installBufferHooks();
   void syncClipboardIn();
   parent.postMessage({ type: "nvim-ready" }, "*");
-  canvas.focus();
+  ime.focus();
 }
 
 if (mode === "embed") {
   window.addEventListener("message", (ev) => {
     const m = ev.data;
-    if (m?.type === "nvim-init") void init(m.text);
+    if (m?.type === "nvim-init") void init(m.text, m.filetype);
   });
 } else {
   void startScratch();
@@ -243,5 +288,5 @@ async function startScratch(): Promise<void> {
   });
   window.addEventListener("beforeunload", flush);
   void channel; // channel already used by installBufferHooks; kept for clarity
-  canvas.focus();
+  ime.focus();
 }

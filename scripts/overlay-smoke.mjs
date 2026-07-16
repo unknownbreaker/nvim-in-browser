@@ -20,6 +20,13 @@
 //   8. `:q` final-sync: fresh text typed then quit within the debounce window
 //      still reaches the field, proving the VimLeavePre final sync (not a
 //      surviving debounce — the frame is torn down before it could fire).
+//   9. IME: a real composition sequence dispatched on the frame's hidden #ime
+//      input (compositionstart/update/end) forwards the composed non-ASCII text
+//      (accented Latin + CJK) into the nvim buffer via the compositionend path.
+//  10. Hostile page: activating with focus on a non-eligible element creates NO
+//      engine-frame overlay and shows the fallback notice pill instead.
+//  11. Filetype: __nvim.request can set + read `&filetype` in-browser (the apply
+//      mechanism); the host->filetype mapping is unit-tested separately.
 //
 // Browser + extension-load handling mirrors scripts/browser-smoke.mjs.
 //
@@ -386,6 +393,91 @@ async function run(exec, headless, id, baseUrl) {
       };
     console.log("[quit] ASSERT OK: :q final-synced fresh text via VimLeavePre");
 
+    // ---- Case 5: IME composition reaches the buffer -----------------------
+    // Dispatch a real browser IME composition sequence
+    // (compositionstart -> compositionupdate -> compositionend) on the frame's
+    // hidden #ime input. This is the exact event path the browser fires when a
+    // user composes CJK / accented text via a system IME; our compositionend
+    // handler forwards ev.data to nvim as literal insert-mode input. Driving the
+    // real events (rather than a synthetic keystroke) proves the composition ->
+    // client.input path end-to-end. We compose an accented Latin string and a
+    // CJK string to cover both non-ASCII shapes.
+    console.log("[ime] re-activating textarea for composition test...");
+    frame = await activateOn(page, "ta");
+    page.__fieldId = "ta";
+    // Open a fresh line and stay in insert mode so composed text is inserted
+    // literally rather than interpreted as normal-mode commands.
+    await frame.evaluate(() => window.__nvim.input("Go"));
+    await wait(150);
+    const composeInFrame = (data) =>
+      frame.evaluate((text) => {
+        const ime = document.getElementById("ime");
+        ime.dispatchEvent(new CompositionEvent("compositionstart", { data: "" }));
+        ime.dispatchEvent(new CompositionEvent("compositionupdate", { data: text }));
+        ime.dispatchEvent(new CompositionEvent("compositionend", { data: text }));
+      }, data);
+    await composeInFrame("café");
+    await wait(200);
+    await composeInFrame("日本");
+    await wait(200);
+    await frame.evaluate(() => window.__nvim.input("<Esc>"));
+    const imeBuf = await frame.evaluate(() => window.__nvim.getBufferText());
+    console.log(`[ime] nvim buffer -> ${JSON.stringify(imeBuf)}`);
+    if (!imeBuf.includes("café"))
+      return { ok: false, reason: `IME accented composition did not reach buffer: ${JSON.stringify(imeBuf)}` };
+    if (!imeBuf.includes("日本"))
+      return { ok: false, reason: `IME CJK composition did not reach buffer: ${JSON.stringify(imeBuf)}` };
+    console.log("[ime] ASSERT OK: composed café + 日本 reached the nvim buffer");
+    await sendEscapeChord(frame);
+    await wait(600);
+
+    // ---- Case 6: hostile page (no eligible field) -> notice, no overlay ----
+    // Focus a non-eligible element (document.body) and trigger activation. The
+    // content script must NOT create an engine-frame iframe, and must instead
+    // show its fallback notice pill (stable selector: [data-nvim-notice]).
+    console.log("[notice] focusing body (non-eligible) and activating...");
+    await page.evaluate(() => {
+      document.documentElement.dataset.nvimTestHook = "1";
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      document.body.focus();
+      window.postMessage({ type: "nvim-activate-test" }, "*");
+    });
+    await wait(800);
+    const noticeState = await page.evaluate(() => {
+      const overlay = Boolean(document.querySelector('iframe[src*="engine-frame.html"]'));
+      const pill = document.querySelector("[data-nvim-notice]");
+      return { overlay, hasPill: Boolean(pill), text: pill ? pill.textContent : null };
+    });
+    console.log(`[notice] state -> ${JSON.stringify(noticeState)}`);
+    if (noticeState.overlay)
+      return { ok: false, reason: "hostile activation created an engine-frame overlay (should be a no-op)" };
+    if (!noticeState.hasPill)
+      return { ok: false, reason: "no fallback notice pill shown on hostile activation" };
+    if (!/scratch/i.test(noticeState.text ?? ""))
+      return { ok: false, reason: `notice text unexpected: ${JSON.stringify(noticeState.text)}` };
+    console.log("[notice] ASSERT OK: no overlay iframe + fallback notice pill shown");
+    // Dismiss the pill so it can't linger into later cases.
+    await page.evaluate(() => document.querySelector("[data-nvim-notice]")?.remove());
+
+    // ---- Case 7: filetype apply mechanism (via __nvim.request) ------------
+    // The host->filetype MAPPING is covered by the pure unit test
+    // (src/content/overlay-filetype.test.ts); the fixture is served from
+    // 127.0.0.1, which filetypeForHost maps to undefined, so no filetype flows
+    // through the real activation path here. This case instead proves the APPLY
+    // MECHANISM in-browser: __nvim.request can set and read &filetype through
+    // the RPC channel, which is exactly what init() does with a mapped host.
+    console.log("[filetype] re-activating textarea to exercise the apply mechanism...");
+    frame = await activateOn(page, "ta");
+    page.__fieldId = "ta";
+    await frame.evaluate(() => window.__nvim.request("nvim_exec2", ["setlocal filetype=markdown", {}]));
+    const ft = await frame.evaluate(() => window.__nvim.request("nvim_get_option_value", ["filetype", {}]));
+    console.log(`[filetype] &filetype -> ${JSON.stringify(ft)}`);
+    if (ft !== "markdown")
+      return { ok: false, reason: `filetype not applied/read via __nvim.request: ${JSON.stringify(ft)}` };
+    console.log("[filetype] ASSERT OK: __nvim.request set + read filetype=markdown");
+    await sendEscapeChord(frame);
+    await wait(600);
+
     await browser.close();
     return { ok: true };
   } catch (e) {
@@ -439,7 +531,10 @@ async function main() {
     }
     if (!result.ok) throw new Error(result.reason);
 
-    console.log("\nPASS: overlay activation, debounced sync, deactivate, input + password cases");
+    console.log(
+      "\nPASS: overlay activation, debounced sync, deactivate, input + password cases, " +
+        "IME composition, hostile-page notice, and filetype-apply mechanism",
+    );
   } finally {
     console.log("restoring production dist/chromium (test hooks disabled)...");
     buildProd();
