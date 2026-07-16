@@ -596,6 +596,40 @@ async function run(exec, headless, id) {
       }
     }
 
+    // Clipboard PROVIDER: `set clipboard=unnamedplus` must work instead of
+    // erroring "clipboard: No provider". The engine registers a g:clipboard
+    // provider; verify registration + a deterministic +register round-trip
+    // through it, then that a plain yank under unnamedplus reaches the + register
+    // (no OS clipboard needed, so this is not flaky like the read above).
+    const providerName = await frame2.evaluate(() =>
+      window.__nvim.request("nvim_eval", ["get(g:clipboard, 'name', '')"]),
+    );
+    if (providerName !== "nvim-in-browser") {
+      await browser.close();
+      return { ok: false, reason: `clipboard provider not registered: g:clipboard.name is ${JSON.stringify(providerName)}` };
+    }
+    await frame2.evaluate(() =>
+      window.__nvim.request("nvim_call_function", ["setreg", ["+", "provider-roundtrip", "c"]]),
+    );
+    const roundtrip = await frame2.evaluate(() =>
+      window.__nvim.request("nvim_call_function", ["getreg", ["+"]]),
+    );
+    if (roundtrip !== "provider-roundtrip") {
+      await browser.close();
+      return { ok: false, reason: `clipboard provider round-trip failed: getreg('+') is ${JSON.stringify(roundtrip)}` };
+    }
+    await frame2.evaluate(() => window.__nvim.request("nvim_command", ["set clipboard=unnamedplus"]));
+    await frame2.evaluate(() => window.__nvim.input("ggyy"));
+    await wait(200);
+    const yankedPlus = await frame2.evaluate(() =>
+      window.__nvim.request("nvim_call_function", ["getreg", ["+"]]),
+    );
+    if (typeof yankedPlus !== "string" || yankedPlus.length === 0) {
+      await browser.close();
+      return { ok: false, reason: `unnamedplus yank did not reach + via provider: getreg('+') is ${JSON.stringify(yankedPlus)}` };
+    }
+    console.log("[PHASE B] ASSERT OK: g:clipboard provider registered; unnamedplus yank routes to + register");
+
     // ---- PHASE C: config loads (IndexedDB -> FS -> nvim at boot) -----------
     // Simulate the options page having saved a config: write init.lua + enabled
     // meta straight into the config store, open a fresh scratch page, and confirm

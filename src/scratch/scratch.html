@@ -14,10 +14,14 @@
     </style>
   </head>
   <body>
+    <!-- Inset the editor by a small margin so the browser window's rounded
+         corners only overlap the dark page background, never the Neovim UI.
+         The engine frame sizes its grid to this (already-inset) iframe, so no
+         corner cells are clipped. -->
     <iframe
       id="nvim"
       src="./engine-frame.html?mode=full"
-      style="border: 0; width: 100vw; height: 100vh"
+      style="border: 0; position: absolute; inset: 10px"
     ></iframe>
   </body>
 </html>
