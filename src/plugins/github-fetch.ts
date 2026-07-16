@@ -27,17 +27,26 @@ export class GithubFetchError extends Error {
   }
 }
 
-export const MAX_FILES = 200;
-export const MAX_TOTAL_BYTES = 5 * 1024 * 1024;
+export const MAX_FILES = 300;
+export const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 
 export interface FetchOptions {
   token?: string;
   fetchImpl?: typeof fetch;
 }
 
-// Only text files that a pure-Lua/Vimscript plugin needs. Everything else
-// (binaries, images, tests, CI) is skipped.
+// Top-level directories a runtime plugin never needs: test suites, CI config,
+// screenshots/media, build/generator scripts, and app-specific theme exports
+// (e.g. tokyonight's extras/). Skipping them keeps large repos (mini.nvim,
+// tokyonight.nvim) well under the file/size caps. Matched against the leading
+// path segment only, so runtime modules like lua/mini/test.lua are untouched.
+const EXCLUDED_DIR =
+  /^(tests?|spec|\.github|\.ci|ci|screenshots?|media|images?|img|assets|demos?|scripts?|tools|examples?|benchmarks?|bench|extras?)\//;
+
+// Only text files that a pure-Lua/Vimscript plugin needs at runtime. Everything
+// else (binaries, images, tests, CI, generator scripts) is skipped.
 function isAllowedPath(path: string): boolean {
+  if (EXCLUDED_DIR.test(path)) return false;
   if (/\.(lua|vim)$/.test(path)) return true;
   if (path === "vimrc" || path.endsWith("/vimrc")) return true;
   if (path.startsWith("doc/") && path.endsWith(".txt")) return true;

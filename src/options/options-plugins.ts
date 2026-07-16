@@ -33,7 +33,7 @@ function fetchErrorMessage(err: unknown): string {
       case "rate-limited":
         return "GitHub rate limit hit. Save a personal access token below to raise it (60/hr → 5,000/hr).";
       case "too-large":
-        return "Plugin exceeds the 200-file / 5 MB limit.";
+        return "Plugin is too large even after skipping test/CI/media files (max 300 files / 10 MB).";
       case "network":
         return `Network error: ${err.message} (some hosts block cross-origin fetch; GitHub works).`;
     }
