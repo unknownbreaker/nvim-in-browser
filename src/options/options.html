@@ -267,6 +267,36 @@
             >…or upload a plugin folder from disk</span
           >
         </div>
+
+        <label class="field-label" for="gh-token" style="margin-top: 16px"
+          >GitHub token (optional)</label
+        >
+        <div class="note" style="margin-bottom: 10px">
+          Raises the API rate limit (60/hr per-IP → 5,000/hr) and lets you install
+          from your <strong>private</strong> repos. A <strong>fine-grained,
+          read-only</strong> token is enough (add <code>Contents: read</code> only
+          for the private repos you'll install). Stored in a
+          <strong>separate local database</strong>, never written into your config
+          or the editor, sent only to GitHub over HTTPS.
+        </div>
+        <div class="row">
+          <input
+            id="gh-token"
+            type="password"
+            placeholder="github_pat_…  (leave blank to keep the saved one)"
+            autocomplete="off"
+            aria-label="GitHub personal access token"
+            style="flex: 2 1 260px"
+          />
+          <button id="gh-token-save" type="button">Save token</button>
+          <button id="gh-token-clear" class="danger" type="button">Clear</button>
+          <span
+            id="gh-token-status"
+            class="hint"
+            style="color: var(--subtext); font-size: 0.8rem"
+          ></span>
+        </div>
+
         <ul id="plugin-list" style="list-style: none; padding: 0; margin: 16px 0 0"></ul>
       </section>
 

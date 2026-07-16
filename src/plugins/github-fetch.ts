@@ -1,12 +1,19 @@
 // Pure GitHub plugin fetcher. Runs in the options page (which has fetch). Uses
-// ONLY endpoints that send Access-Control-Allow-Origin: * (api.github.com for
-// the file tree, raw.githubusercontent.com for blobs), so no host_permissions
-// are needed. fetchImpl is injectable for unit tests. Enforces file-count and
-// total-size caps so a giant repo can't be pulled into IndexedDB.
+// ONLY hosts that send Access-Control-Allow-Origin: * (api.github.com +
+// raw.githubusercontent.com), so no host_permissions are needed — this holds
+// even with a token, which is sent as an Authorization header (api.github.com
+// supports CORS for token auth). fetchImpl is injectable for unit tests.
+//
+// Without a token: lists the tree and pulls PUBLIC files from raw.
+// With a token: authenticates the api.github.com calls (raising the 60/hr
+// per-IP limit to 5000/hr per account) and, for PRIVATE repos, pulls each
+// file's bytes through the authenticated git-blobs API (base64), since raw
+// cannot serve private files with a token.
 import { isSafeRelpath } from "../storage/config-store";
 
 export type GithubFetchErrorKind =
   | "repo-not-found"
+  | "unauthorized"
   | "rate-limited"
   | "too-large"
   | "network";
@@ -23,6 +30,11 @@ export class GithubFetchError extends Error {
 export const MAX_FILES = 200;
 export const MAX_TOTAL_BYTES = 5 * 1024 * 1024;
 
+export interface FetchOptions {
+  token?: string;
+  fetchImpl?: typeof fetch;
+}
+
 // Only text files that a pure-Lua/Vimscript plugin needs. Everything else
 // (binaries, images, tests, CI) is skipped.
 function isAllowedPath(path: string): boolean {
@@ -36,34 +48,75 @@ interface TreeEntry {
   path: string;
   type: string;
   size?: number;
+  sha?: string;
+}
+
+// api.github.com request headers. Accept is CORS-safelisted (no preflight);
+// Authorization (when a token is present) triggers a CORS preflight that
+// api.github.com answers — still no host_permissions needed.
+function apiHeaders(token?: string): Record<string, string> {
+  const h: Record<string, string> = { Accept: "application/vnd.github+json" };
+  if (token) h.Authorization = `Bearer ${token}`;
+  return h;
+}
+
+// Map a non-ok api.github.com response to a typed error. `null` when ok.
+function apiError(res: Response, repo: string, ref: string): GithubFetchError | null {
+  if (res.ok) return null;
+  if (res.status === 401) {
+    return new GithubFetchError("unauthorized", "GitHub rejected the token (invalid, expired, or missing access)");
+  }
+  if (res.status === 403 && res.headers.get("X-RateLimit-Remaining") === "0") {
+    return new GithubFetchError("rate-limited", "GitHub rate limit hit — add or check your token");
+  }
+  if (res.status === 404) {
+    return new GithubFetchError("repo-not-found", `repo or ref not found (or the token lacks access): ${repo}@${ref}`);
+  }
+  return new GithubFetchError("network", `GitHub HTTP ${res.status}`);
+}
+
+function decodeBase64(b64: string): Uint8Array {
+  const bin = atob(b64.replace(/\s/g, ""));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 export async function fetchGithubPlugin(
   repo: string,
   ref: string,
-  fetchImpl: typeof fetch = fetch,
+  opts: FetchOptions = {},
 ): Promise<{ files: { path: string; data: Uint8Array }[] }> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const token = opts.token;
   const [owner, name] = repo.split("/");
   if (!owner || !name) {
     throw new GithubFetchError("repo-not-found", `expected owner/repo, got "${repo}"`);
   }
-  const treeUrl = `https://api.github.com/repos/${owner}/${name}/git/trees/${encodeURIComponent(ref)}?recursive=1`;
 
-  let treeRes: Response;
-  try {
-    treeRes = await fetchImpl(treeUrl);
-  } catch (e) {
-    throw new GithubFetchError("network", e instanceof Error ? e.message : String(e));
+  const api = (path: string) => `https://api.github.com/repos/${owner}/${name}${path}`;
+  const getApi = async (url: string): Promise<Response> => {
+    try {
+      return await fetchImpl(url, { headers: apiHeaders(token) });
+    } catch (e) {
+      throw new GithubFetchError("network", e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // With a token, learn whether the repo is private so we pick the right blob
+  // source (raw for public, blobs API for private). Without a token we assume
+  // public (raw) — a private repo would 404 on the tree call below anyway.
+  let isPrivate = false;
+  if (token) {
+    const metaRes = await getApi(api(""));
+    const metaErr = apiError(metaRes, repo, ref);
+    if (metaErr) throw metaErr;
+    isPrivate = ((await metaRes.json()) as { private?: boolean }).private === true;
   }
-  if (treeRes.status === 404) {
-    throw new GithubFetchError("repo-not-found", `repo or ref not found: ${repo}@${ref}`);
-  }
-  if (treeRes.status === 403 && treeRes.headers.get("X-RateLimit-Remaining") === "0") {
-    throw new GithubFetchError("rate-limited", "GitHub rate limit hit (60/hr unauthenticated)");
-  }
-  if (!treeRes.ok) {
-    throw new GithubFetchError("network", `tree HTTP ${treeRes.status}`);
-  }
+
+  const treeRes = await getApi(api(`/git/trees/${encodeURIComponent(ref)}?recursive=1`));
+  const treeErr = apiError(treeRes, repo, ref);
+  if (treeErr) throw treeErr;
 
   const body = (await treeRes.json()) as { tree?: TreeEntry[] };
   const blobs = (body.tree ?? []).filter(
@@ -80,17 +133,33 @@ export async function fetchGithubPlugin(
 
   const files: { path: string; data: Uint8Array }[] = [];
   for (const b of blobs) {
-    const rawUrl = `https://raw.githubusercontent.com/${owner}/${name}/${ref}/${b.path}`;
-    let res: Response;
-    try {
-      res = await fetchImpl(rawUrl);
-    } catch (e) {
-      throw new GithubFetchError("network", e instanceof Error ? e.message : String(e));
+    let data: Uint8Array;
+    if (token && isPrivate) {
+      // Private repo: raw won't serve it with a token, so pull the blob by SHA
+      // through the authenticated git-blobs API (base64).
+      if (!b.sha) throw new GithubFetchError("network", `${b.path}: missing blob sha`);
+      const blobRes = await getApi(api(`/git/blobs/${b.sha}`));
+      const blobErr = apiError(blobRes, repo, ref);
+      if (blobErr) throw blobErr;
+      const blob = (await blobRes.json()) as { content?: string; encoding?: string };
+      if (blob.encoding !== "base64" || typeof blob.content !== "string") {
+        throw new GithubFetchError("network", `${b.path}: unexpected blob encoding`);
+      }
+      data = decodeBase64(blob.content);
+    } else {
+      const rawUrl = `https://raw.githubusercontent.com/${owner}/${name}/${ref}/${b.path}`;
+      let res: Response;
+      try {
+        res = await fetchImpl(rawUrl);
+      } catch (e) {
+        throw new GithubFetchError("network", e instanceof Error ? e.message : String(e));
+      }
+      if (!res.ok) {
+        throw new GithubFetchError("network", `${b.path}: HTTP ${res.status}`);
+      }
+      data = new Uint8Array(await res.arrayBuffer());
     }
-    if (!res.ok) {
-      throw new GithubFetchError("network", `${b.path}: HTTP ${res.status}`);
-    }
-    files.push({ path: b.path, data: new Uint8Array(await res.arrayBuffer()) });
+    files.push({ path: b.path, data });
   }
   return { files };
 }
