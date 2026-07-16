@@ -416,9 +416,39 @@ async function installBufferHooks(): Promise<number> {
     [
       `autocmd TextChanged,TextChangedI * call rpcnotify(${channel}, 'wasm_text_changed')`,
       `autocmd VimLeavePre * call rpcnotify(${channel}, 'wasm_text_final', join(getline(1,'$'),"\\n"))`,
-      `autocmd TextYankPost * if v:event.regname ==# '+' || v:event.regname ==# '*' | call rpcnotify(${channel}, 'clipboard_copy', v:event.regcontents) | endif`,
+      // Mirror yanks to the system clipboard on an explicit "+/"* yank, OR on an
+      // unnamed yank when 'clipboard' contains unnamed/unnamedplus (those route to
+      // + but report regname ''). setreg() does not fire TextYankPost, so the
+      // paste-IN sync can't feed back into this.
+      `autocmd TextYankPost * if v:event.regname ==# '+' || v:event.regname ==# '*' || (v:event.regname ==# '' && &clipboard =~# 'unnamed') | call rpcnotify(${channel}, 'clipboard_copy', v:event.regcontents) | endif`,
     ].join("\n"),
     {},
+  ]);
+  // Register a clipboard provider so `set clipboard=unnamedplus` works instead
+  // of erroring with "clipboard: No provider". There is no pbcopy/xclip in the
+  // sandbox, so this provider is a thin in-memory register cache: nvim writes
+  // `+`/`*` into it and reads back from it. The REAL system-clipboard sync stays
+  // where it already lives — the TextYankPost autocmd above mirrors yanks OUT to
+  // navigator.clipboard, and syncClipboardIn() setreg's the system clipboard IN
+  // (which now flows through this provider's copy fn). cache_enabled lets nvim
+  // reuse the cached value between reads.
+  await client.request("nvim_exec_lua", [
+    [
+      "local reg = { ['+'] = { { '' }, 'v' }, ['*'] = { { '' }, 'v' } }",
+      "vim.g.clipboard = {",
+      "  name = 'nvim-in-browser',",
+      "  copy = {",
+      "    ['+'] = function(lines, regtype) reg['+'] = { lines, regtype } end,",
+      "    ['*'] = function(lines, regtype) reg['*'] = { lines, regtype } end,",
+      "  },",
+      "  paste = {",
+      "    ['+'] = function() return reg['+'] end,",
+      "    ['*'] = function() return reg['*'] end,",
+      "  },",
+      "  cache_enabled = 1,",
+      "}",
+    ].join("\n"),
+    [],
   ]);
   return channel;
 }
