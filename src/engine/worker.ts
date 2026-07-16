@@ -4,7 +4,10 @@
 // WASI + Asyncify driving to startNvimHost.
 //
 // postMessage protocol (later tasks depend on these exact shapes):
-//   page -> worker: { type: "start", wasmUrl, runtimeUrl } | { type: "stdin", chunk }
+//   page -> worker: { type: "start", wasmUrl, runtimeUrl, argv?, configFiles? } |
+//                   { type: "stdin", chunk }
+//     - argv?: string[] overrides the default nvim argv (e.g. drop -u NORC to load config)
+//     - configFiles?: { path: string; data: Uint8Array }[] written into the WASI FS at boot
 //   worker -> page: { type: "ready" } | { type: "stdout", chunk } |
 //                   { type: "exit", code } | { type: "fatal", message } |
 //                   { type: "stat", wakeupsPerSecond }  (every 5s)
@@ -15,6 +18,8 @@ interface StartMsg {
   type: "start";
   wasmUrl: string;
   runtimeUrl: string;
+  argv?: string[];
+  configFiles?: { path: string; data: Uint8Array }[];
 }
 interface StdinMsg {
   type: "stdin";
@@ -46,12 +51,17 @@ async function start(msg: StartMsg): Promise<void> {
       fetch(msg.runtimeUrl).then((r) => r.arrayBuffer()),
     ]);
     const entries = untar(await gunzip(new Uint8Array(runtimeGz)));
-    host = await startNvimHost(new Uint8Array(wasmBytes), entries, {
-      onStdout: (chunk) => ctx.postMessage({ type: "stdout", chunk }, [chunk.buffer]),
-      onExit: (code) => ctx.postMessage({ type: "exit", code }),
-      onFatal: (message) => ctx.postMessage({ type: "fatal", message }),
-      onStat: (wakeupsPerSecond) => ctx.postMessage({ type: "stat", wakeupsPerSecond }),
-    });
+    host = await startNvimHost(
+      new Uint8Array(wasmBytes),
+      entries,
+      {
+        onStdout: (chunk) => ctx.postMessage({ type: "stdout", chunk }, [chunk.buffer]),
+        onExit: (code) => ctx.postMessage({ type: "exit", code }),
+        onFatal: (message) => ctx.postMessage({ type: "fatal", message }),
+        onStat: (wakeupsPerSecond) => ctx.postMessage({ type: "stat", wakeupsPerSecond }),
+      },
+      { argv: msg.argv, configFiles: msg.configFiles },
+    );
     // nvim has booted and is parked waiting for its first RPC input.
     ctx.postMessage({ type: "ready" });
   } catch (e) {
