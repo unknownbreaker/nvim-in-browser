@@ -274,7 +274,16 @@ function showNotice(message: string, withScratchAction: boolean): void {
 let activating = false;
 
 async function activate(): Promise<void> {
-  if (active || activating) return;
+  // Toggle: pressing the activation chord while the overlay is up closes it and
+  // returns to the field. Ask the frame to close (rather than ripping the
+  // iframe) so it pulls + syncs the final buffer text first. Covers the case
+  // where the Chrome command reaches this content script; when embedded nvim has
+  // focus instead, the frame's own keydown handles the chord.
+  if (active) {
+    active.frame.contentWindow?.postMessage({ type: "nvim-request-close" }, "*");
+    return;
+  }
+  if (activating) return;
   activating = true;
   try {
     const target = await resolveTarget();

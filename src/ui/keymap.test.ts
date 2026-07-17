@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { keyEventToNvim, isEscapeChord } from "./keymap";
+import { keyEventToNvim, isEscapeChord, isToggleChord } from "./keymap";
 
 const ev = (key: string, mods: Partial<{ ctrlKey: boolean; altKey: boolean; metaKey: boolean; shiftKey: boolean }> = {}) =>
   ({ key, ctrlKey: false, altKey: false, metaKey: false, shiftKey: false, ...mods });
@@ -33,6 +33,19 @@ describe("keyEventToNvim", () => {
     const chord = ev("Escape", { ctrlKey: true, shiftKey: true });
     expect(isEscapeChord(chord)).toBe(true);
     expect(keyEventToNvim(chord)).toBeNull();
+  });
+  it("detects the toggle chord (Ctrl+Shift+E) and never translates it", () => {
+    const chord = ev("E", { ctrlKey: true, shiftKey: true });
+    expect(isToggleChord(chord)).toBe(true);
+    expect(keyEventToNvim(chord)).toBeNull();
+    // Not the toggle chord: wrong key, missing a modifier, or extra modifier.
+    expect(isToggleChord(ev("R", { ctrlKey: true, shiftKey: true }))).toBe(false);
+    expect(isToggleChord(ev("E", { ctrlKey: true }))).toBe(false);
+    expect(isToggleChord(ev("E", { shiftKey: true }))).toBe(false);
+    expect(isToggleChord(ev("E", { ctrlKey: true, shiftKey: true, altKey: true }))).toBe(false);
+    expect(isToggleChord(ev("E", { ctrlKey: true, shiftKey: true, metaKey: true }))).toBe(false);
+    // Ctrl+Shift+R still translates (only E is the toggle chord).
+    expect(keyEventToNvim(ev("R", { ctrlKey: true, shiftKey: true }))).toBe("<C-S-R>");
   });
   it("keeps modifiers on <", () => {
     expect(keyEventToNvim(ev("<", { ctrlKey: true }))).toBe("<C-lt>");
