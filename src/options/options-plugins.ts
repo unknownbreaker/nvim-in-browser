@@ -4,6 +4,7 @@
 // in the shared status line, never a blank page. Thin UI over the tested
 // plugin-store + github-fetch + folder-upload units.
 import { openPluginStore, isSafePluginName, type PluginRecord } from "../storage/plugin-store";
+import { verifyPluginCompat } from "../plugins/compat-verify";
 import { fetchGithubPlugin, GithubFetchError } from "../plugins/github-fetch";
 import { openTokenStore } from "../storage/token-store";
 import { openMarketplaceStore } from "../storage/marketplace-store";
@@ -162,6 +163,20 @@ function renderCard(p: PluginRecord): HTMLLIElement {
   toggleLabel.append(toggle, toggleText);
   actions.append(toggleLabel);
 
+  // Verify: boot a throwaway sandbox and report what the plugin tries to do.
+  const verify = document.createElement("button");
+  verify.type = "button";
+  verify.textContent = "Verify";
+  verify.title =
+    "Boot this plugin in a throwaway sandboxed Neovim and report whether it tries " +
+    "to use anything the WASM sandbox can't do. Only covers the code paths that run on load.";
+  // Per-card result line; populated by onVerify (no fixed id — it's per card).
+  const result = document.createElement("div");
+  result.className = "plugin-card-verify";
+  result.hidden = true;
+  verify.addEventListener("click", () => void onVerify(p, verify, result));
+  actions.append(verify);
+
   if (p.source === "github") {
     const refresh = document.createElement("button");
     refresh.type = "button";
@@ -176,8 +191,54 @@ function renderCard(p: PluginRecord): HTMLLIElement {
   remove.addEventListener("click", () => void onRemove(p.name));
   actions.append(remove);
 
-  li.append(header, meta, actions);
+  li.append(header, meta, actions, result);
   return li;
+}
+
+// Boot the plugin in a throwaway sandbox and render the verdict on its card.
+// Guarded end-to-end: any failure lands on the card + status line, never a blank
+// page, and the button is always re-enabled.
+async function onVerify(
+  p: PluginRecord,
+  btn: HTMLButtonElement,
+  result: HTMLDivElement,
+): Promise<void> {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Verifying…";
+  result.hidden = true;
+  status(`Verifying ${p.name}… (booting sandbox)`, "info");
+  try {
+    const verdict = await verifyPluginCompat(p.name, p.files);
+    result.hidden = false;
+    if (verdict.ok) {
+      result.className = "plugin-card-verify verify-caution";
+      result.textContent =
+        "✓ Loaded without using anything unsupported — but this only tested the code " +
+        "paths that ran on load, so it may still not work in use.";
+      status(`${p.name}: loaded cleanly in the sandbox (load-path only).`, "ok");
+    } else {
+      result.className = "plugin-card-verify verify-bad";
+      if (verdict.attempts.length > 0) {
+        result.textContent = "Tries: " + verdict.attempts.join(", ") + " — won't work in the sandbox.";
+      } else if (verdict.loadError) {
+        result.textContent = "Failed to load: " + verdict.loadError.trim().slice(0, 200);
+      } else if (verdict.crashed) {
+        result.textContent = "Crashed or timed out during the check.";
+      } else {
+        result.textContent = "Could not verify — unknown result.";
+      }
+      status(`${p.name}: won't work in the sandbox (see the card for details).`, "err");
+    }
+  } catch (err) {
+    result.hidden = false;
+    result.className = "plugin-card-verify verify-bad";
+    result.textContent = "Verify failed to run.";
+    status(`Verify failed for ${p.name}: ${err instanceof Error ? err.message : String(err)}`, "err");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
 }
 
 // --- Marketplace: self-discovered (or bundled-seed) pure-Lua plugins ---------

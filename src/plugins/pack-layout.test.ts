@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pluginsToConfigFiles, PACK_BASE } from "./pack-layout";
+import { pluginsToConfigFiles, pluginFilesToOpt, PACK_BASE, OPT_BASE } from "./pack-layout";
 import type { PluginRecord } from "../storage/plugin-store";
 
 const rec = (name: string, enabled: boolean, files: string[]): PluginRecord => ({
@@ -31,5 +31,32 @@ describe("pluginsToConfigFiles", () => {
   });
   it("returns empty for no plugins", () => {
     expect(pluginsToConfigFiles([])).toEqual([]);
+  });
+});
+
+const enc = (s: string) => new TextEncoder().encode(s);
+
+describe("pluginFilesToOpt", () => {
+  it("maps a plugin's files to absolute opt-pack paths", () => {
+    const out = pluginFilesToOpt("cand.nvim", [
+      { path: "plugin/cand.lua", data: enc("plugin/cand.lua") },
+      { path: "lua/cand/init.lua", data: enc("lua/cand/init.lua") },
+    ]);
+    expect(out.map((f) => f.path)).toEqual([
+      `${OPT_BASE}cand.nvim/plugin/cand.lua`,
+      `${OPT_BASE}cand.nvim/lua/cand/init.lua`,
+    ]);
+  });
+  it("carries the file bytes through unchanged", () => {
+    const out = pluginFilesToOpt("foo", [{ path: "plugin/foo.lua", data: enc("BYTES") }]);
+    expect(new TextDecoder().decode(out[0].data)).toBe("BYTES");
+  });
+  it("stages under opt/, never start/", () => {
+    const out = pluginFilesToOpt("foo", [{ path: "plugin/foo.lua", data: enc("x") }]);
+    expect(out[0].path.startsWith(OPT_BASE)).toBe(true);
+    expect(out[0].path.includes(PACK_BASE)).toBe(false);
+  });
+  it("returns empty for no files", () => {
+    expect(pluginFilesToOpt("foo", [])).toEqual([]);
   });
 });

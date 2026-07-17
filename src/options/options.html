@@ -463,6 +463,25 @@
         padding: 6px 12px;
         font-size: 0.82rem;
       }
+      .plugin-card-verify {
+        font-size: 0.8rem;
+        line-height: 1.4;
+        border-radius: 6px;
+        padding: 8px 10px;
+        margin-top: 4px;
+      }
+      /* Passing plugins carry a deliberate caution note (green text, yellow rule):
+         only load-path code was exercised, so "clean" is not a guarantee. */
+      .verify-caution {
+        color: var(--green);
+        background: rgba(166, 227, 161, 0.1);
+        border-left: 3px solid var(--yellow);
+      }
+      .verify-bad {
+        color: var(--red);
+        background: rgba(243, 139, 168, 0.1);
+        border-left: 3px solid var(--red);
+      }
       .tag {
         font-size: 0.7rem;
         font-weight: 600;
@@ -742,6 +761,13 @@
               </div>
 
               <h2 class="plugin-subhead">Installed</h2>
+              <div class="note" style="border-left-color: var(--accent); margin-bottom: 12px">
+                <strong>Verify</strong> boots the plugin in a throwaway sandboxed
+                Neovim and reports whether it tries to use anything the WASM sandbox
+                can't do (spawning processes, sockets, native code, hard-dep plugins).
+                It's best-effort: it only covers the code paths that actually run on
+                load, so a plugin that passes may still not work in use.
+              </div>
               <ul id="plugin-list" class="plugin-grid"></ul>
 
               <div class="note" style="margin-top: 16px">
