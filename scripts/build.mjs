@@ -56,6 +56,17 @@ await cp(
   path.join(outDir, "engine-frame.html"),
 );
 
+// StyLua (Lua formatter): copy its prebuilt wasm-bindgen "web" build verbatim.
+// The options page lazily dynamic-import()s stylua_lib_web.js and init()s it
+// with explicit wasm bytes on first Format (src/options/options-format.ts), so
+// the ~3.3MB wasm never touches the options-page startup path. Copying (rather
+// than bundling through esbuild) sidesteps wasm-bindgen's
+// `new URL('stylua_lib_bg.wasm', import.meta.url)` locator.
+const styluaDir = path.join(root, "node_modules", "@johnnymorganz", "stylua");
+for (const f of ["stylua_lib_web.js", "stylua_lib_bg.wasm"]) {
+  await cp(path.join(styluaDir, f), path.join(outDir, f));
+}
+
 // Toolbar / extension icons (referenced by manifest icons + action.default_icon).
 const iconDir = path.join(outDir, "icons");
 await mkdir(iconDir, { recursive: true });

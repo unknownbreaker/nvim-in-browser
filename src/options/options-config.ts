@@ -4,6 +4,7 @@
 // folder-upload units. Drives the shared status line via the nib-status event.
 import { openConfigStore, isSafeRelpath } from "../storage/config-store";
 import { readFolderUpload } from "./folder-upload";
+import { detectFormatLang, formatLua, formatVim } from "./options-format";
 
 const store = openConfigStore();
 let current = "init.lua"; // relpath being edited
@@ -181,11 +182,83 @@ async function select(name: string): Promise<void> {
   await refreshList();
 }
 
+// --- Formatting --------------------------------------------------------------
+// "Format on save" is a small UI preference; keep it in localStorage rather than
+// migrating the config-store meta schema for one boolean.
+const FORMAT_ON_SAVE_KEY = "nib:formatOnSave";
+function formatOnSaveEnabled(): boolean {
+  try {
+    return localStorage.getItem(FORMAT_ON_SAVE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function setFormatOnSave(on: boolean): void {
+  try {
+    localStorage.setItem(FORMAT_ON_SAVE_KEY, on ? "1" : "0");
+  } catch {
+    // Private-mode / storage-disabled: the toggle just won't persist.
+  }
+}
+
+// Format `code` for `name`'s language, or null if unsupported or formatting
+// failed (never throws — a formatter failure must not block a save).
+async function tryFormat(name: string, code: string): Promise<string | null> {
+  const lang = detectFormatLang(name);
+  if (!lang) return null;
+  try {
+    return lang === "lua" ? await formatLua(code) : formatVim(code);
+  } catch (err) {
+    status(`Format skipped for ${name}: ${describe(err)}`, "info");
+    return null;
+  }
+}
+
+// Explicit Format button: format the current file and load the result into the
+// editor (marked dirty + autosaved), leaving the code untouched on failure.
+async function onFormat(): Promise<void> {
+  const lang = detectFormatLang(current);
+  if (!lang) {
+    status(`No formatter for ${current} — Lua (.lua) and Vimscript (.vim) only.`, "info");
+    return;
+  }
+  const btn = el<HTMLButtonElement>("config-format");
+  btn.disabled = true;
+  status(`Formatting ${current}…`, "info");
+  try {
+    const src = el<HTMLTextAreaElement>("editor").value;
+    const out = lang === "lua" ? await formatLua(src) : formatVim(src);
+    if (out === src) {
+      status(`${current} already formatted ✓`, "ok");
+      return;
+    }
+    el<HTMLTextAreaElement>("editor").value = out;
+    editorSet();
+    syncSaveButton();
+    scheduleAutosave();
+    status(`Formatted ${current} ✓`, "ok");
+  } catch (err) {
+    status(`Format failed: ${describe(err)} — code left unchanged.`, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function onSave(): Promise<void> {
   clearTimeout(autosaveTimer); // a manual save preempts the pending autosave
   el<HTMLButtonElement>("save").disabled = true;
   try {
-    const value = el<HTMLTextAreaElement>("editor").value;
+    let value = el<HTMLTextAreaElement>("editor").value;
+    // Format-on-save applies to the explicit Save only (not the background
+    // autosave, which must never rewrite text mid-typing).
+    if (formatOnSaveEnabled()) {
+      const formatted = await tryFormat(current, value);
+      if (formatted !== null && formatted !== value) {
+        value = formatted;
+        el<HTMLTextAreaElement>("editor").value = value;
+        editorSet();
+      }
+    }
     await store.saveFile(current, value);
     savedValue = value;
     status(`Saved ${current} ✓ (reload your editor tab to apply)`, "ok");
@@ -334,6 +407,10 @@ export function initConfigUI(): void {
   });
   window.addEventListener("beforeunload", () => void flushAutosave());
   el<HTMLButtonElement>("save").addEventListener("click", () => void onSave());
+  el<HTMLButtonElement>("config-format").addEventListener("click", () => void onFormat());
+  const formatOnSave = el<HTMLInputElement>("format-on-save");
+  formatOnSave.checked = formatOnSaveEnabled();
+  formatOnSave.addEventListener("change", () => setFormatOnSave(formatOnSave.checked));
   el<HTMLButtonElement>("config-add").addEventListener("click", () => void onAdd());
   el<HTMLButtonElement>("config-rename").addEventListener("click", () => void onRename());
   el<HTMLButtonElement>("config-delete").addEventListener("click", () => void onDelete());

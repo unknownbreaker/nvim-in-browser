@@ -631,8 +631,12 @@
                 ></textarea>
                 <div class="row">
                   <button id="save" class="primary" type="button" title="Save the current file to the browser (reload your editor tab to apply).">Save file</button>
+                  <button id="config-format" type="button" title="Format the current file — StyLua for .lua, a conservative reindent for .vim. Leaves code unchanged if it can't be parsed.">Format</button>
                   <button id="config-rename" type="button" title="Rename the current file.">Rename</button>
                   <button id="config-delete" class="danger" type="button" title="Delete the current file from the browser.">Delete file</button>
+                  <label class="control" title="Format Lua/Vimscript automatically each time you Save (not while autosaving)." style="margin-left: auto">
+                    <input id="format-on-save" type="checkbox" /> Format on save
+                  </label>
                 </div>
               </div>
             </div>
