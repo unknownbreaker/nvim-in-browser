@@ -70,6 +70,7 @@ describe("sourceDisqualifier", () => {
     expect(sourceDisqualifier("vim.fn.serverstart()")).toBe("sockets/channels");
     expect(sourceDisqualifier("vim.lsp.start({ name = 'x' })")).toBe("vim.lsp.start");
     expect(sourceDisqualifier("vim.lsp.start_client({})")).toBe("vim.lsp.start");
+    expect(sourceDisqualifier("vim.lsp.enable('luals')")).toBe("vim.lsp.start");
     expect(sourceDisqualifier("vim.uv.getaddrinfo('host')")).toBe("libuv");
   });
   it("flags native library loading (loadlib + C-extension modules)", () => {
@@ -77,6 +78,9 @@ describe("sourceDisqualifier", () => {
     expect(sourceDisqualifier("local s = require('socket')")).toBe("native-lua-module");
     expect(sourceDisqualifier("require('socket.http')")).toBe("native-lua-module");
     expect(sourceDisqualifier("require('cjson')")).toBe("native-lua-module");
+    // lpeg + luv are statically linked into core Neovim — NOT native-lua-module.
+    expect(sourceDisqualifier("local lpeg = require('lpeg')")).toBeNull();
+    expect(sourceDisqualifier("local uv = require('luv')")).toBeNull();
   });
   it("does NOT flag bare vim.treesitter (7 grammars ship in the engine)", () => {
     // The engine bundles c/lua/vim/vimdoc/query/markdown/markdown_inline, so

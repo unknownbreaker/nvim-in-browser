@@ -70,6 +70,7 @@ pcall(function()
       uv.spawn = function() rec('uv.spawn'); return nil end
       uv.new_tcp = function() rec('uv.new_tcp'); return nil end
       uv.new_udp = function() rec('uv.new_udp'); return nil end
+      uv.getaddrinfo = function() rec('uv.getaddrinfo'); return nil end
     end
   end
 end)
@@ -102,7 +103,7 @@ end)
 -- match on the leading dotted component.
 pcall(function()
   local risky = {
-    ffi = true, socket = true, ssl = true, cjson = true, posix = true, luv = true,
+    ffi = true, socket = true, ssl = true, cjson = true, posix = true,
     plenary = true, telescope = true, ['nvim-treesitter'] = true, mason = true,
     lspconfig = true, ['nvim-dap'] = true, ['null-ls'] = true, ['none-ls'] = true,
     gitsigns = true, conform = true, ['nvim-lint'] = true, toggleterm = true,
@@ -156,53 +157,57 @@ export async function verifyPluginCompat(
   opts?: { timeoutMs?: number },
 ): Promise<VerifyResult> {
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const client = makeClient();
+  let client: NvimClient | undefined;
   let crashed = false;
   let loadError: string | undefined;
-  // A post-ready worker fatal routes here; a pre-ready fatal rejects start()
-  // (handled by the surrounding try). Either way we flag the run as crashed.
-  client.onFatal = () => {
-    crashed = true;
-  };
-
-  // Run the full boot->record->packadd->read sequence, mutating loadError in the
-  // load-failure case but still continuing on to read back the recorded attempts.
-  const runSequence = async (): Promise<string[]> => {
-    await client.start(20, 4, {
-      argv: CLEAN_ARGV,
-      configFiles: pluginFilesToOpt(name, files),
-    });
-    // Install the recording prelude BEFORE the plugin ever runs.
-    await client.request("nvim_exec_lua", [RECORDING_PRELUDE, []]);
-    // Load the plugin. A sourcing error rejects the RPC — record it but continue.
-    try {
-      await client.request("nvim_exec2", ["packadd " + name, {}]);
-    } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
-    }
-    // Best-effort: require the main module + run setup({}) so its side effects
-    // (and any unsupported calls therein) are captured. Never fatal on its own.
-    try {
-      await client.request("nvim_exec_lua", [ACTIVATE_LUA, [candidateModuleNames(name)]]);
-    } catch {
-      // A require/setup throw is expected for hard-dep plugins; the require wrap
-      // already recorded the attempt, so swallow and read _NIB below.
-    }
-    const raw = await client.request("nvim_exec_lua", ["return vim.json.encode(_NIB.calls)", []]);
-    let parsed: unknown = [];
-    try {
-      parsed = JSON.parse(typeof raw === "string" ? raw : "[]");
-    } catch {
-      parsed = [];
-    }
-    // vim.json.encode of an empty Lua table yields "{}", not "[]", so guard with
-    // Array.isArray (an empty object then correctly becomes no attempts).
-    const list = Array.isArray(parsed) ? parsed.map((x) => String(x)) : [];
-    return Array.from(new Set(list));
-  };
-
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    // Construct the client INSIDE the try so a Worker/getURL failure returns a
+    // VerifyResult rather than throwing out of the verifier.
+    const c = makeClient();
+    client = c;
+    // A post-ready worker fatal routes here; a pre-ready fatal rejects start()
+    // (handled by the surrounding try). Either way we flag the run as crashed.
+    c.onFatal = () => {
+      crashed = true;
+    };
+
+    // Run the full boot->record->packadd->read sequence, mutating loadError in the
+    // load-failure case but still continuing on to read back the recorded attempts.
+    const runSequence = async (): Promise<string[]> => {
+      await c.start(20, 4, {
+        argv: CLEAN_ARGV,
+        configFiles: pluginFilesToOpt(name, files),
+      });
+      // Install the recording prelude BEFORE the plugin ever runs.
+      await c.request("nvim_exec_lua", [RECORDING_PRELUDE, []]);
+      // Load the plugin. A sourcing error rejects the RPC — record it but continue.
+      try {
+        await c.request("nvim_exec2", ["packadd " + name, {}]);
+      } catch (e) {
+        loadError = e instanceof Error ? e.message : String(e);
+      }
+      // Best-effort: require the main module + run setup({}) so its side effects
+      // (and any unsupported calls therein) are captured. Never fatal on its own.
+      try {
+        await c.request("nvim_exec_lua", [ACTIVATE_LUA, [candidateModuleNames(name)]]);
+      } catch {
+        // A require/setup throw is expected for hard-dep plugins; the require wrap
+        // already recorded the attempt, so swallow and read _NIB below.
+      }
+      const raw = await c.request("nvim_exec_lua", ["return vim.json.encode(_NIB.calls)", []]);
+      let parsed: unknown = [];
+      try {
+        parsed = JSON.parse(typeof raw === "string" ? raw : "[]");
+      } catch {
+        parsed = [];
+      }
+      // vim.json.encode of an empty Lua table yields "{}", not "[]", so guard with
+      // Array.isArray (an empty object then correctly becomes no attempts).
+      const list = Array.isArray(parsed) ? parsed.map((x) => String(x)) : [];
+      return Array.from(new Set(list));
+    };
+
     const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(new Error("verify timed out")), timeoutMs);
     });
@@ -216,7 +221,7 @@ export async function verifyPluginCompat(
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     try {
-      client.dispose();
+      client?.dispose();
     } catch {
       // dispose just terminates the worker; ignore any teardown error.
     }

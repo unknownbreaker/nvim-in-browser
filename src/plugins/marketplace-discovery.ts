@@ -66,13 +66,18 @@ const DISQUALIFIERS: { re: RegExp; name: string }[] = [
   // channels / RPC sockets (Lua vim.fn.* and Vimscript)
   { re: /\b(?:vim\.fn\.)?(?:sockconnect|serverstart|ch_open|chansend)\s*\(/, name: "sockets/channels" },
   // LSP client needs a language-server process + a stdio/socket channel
-  { re: /\bvim\.lsp\.start(?:_client)?\s*\(/, name: "vim.lsp.start" },
+  // (start/start_client, and 0.11's vim.lsp.enable which starts configured servers)
+  { re: /\bvim\.lsp\.(?:start(?:_client)?|enable)\s*\(/, name: "vim.lsp.start" },
   // FFI / dynamic native library load. `\(?` so Lua's paren-less string-call
   // sugar (`require 'ffi'`) is caught.
   { re: /require\s*\(?\s*['"]ffi['"]/, name: "ffi" },
   { re: /\bpackage\.loadlib\s*\(/, name: "package.loadlib" },
-  // C-extension Lua modules that won't load without a native loader
-  { re: /require\s*\(?\s*['"](?:socket(?:\.\w+)?|ssl|cjson|posix|luv|lpeg)['"]/, name: "native-lua-module" },
+  // C-extension Lua modules that won't load without a native loader. NB: lpeg
+  // and luv are statically linked into core Neovim (require('lpeg')/require('luv')
+  // resolve to built-ins — lpeg backs vim.lpeg/vim.re; luv is the vim.loop table),
+  // so they are NOT listed here; luv's incompatible socket/spawn methods are
+  // already caught by the libuv disqualifier above.
+  { re: /require\s*\(?\s*['"](?:socket(?:\.\w+)?|ssl|cjson|posix)['"]/, name: "native-lua-module" },
   // tree-sitter PARSER INSTALL. The engine ships 7 static grammars, so plain
   // `vim.treesitter` use is FINE and no longer disqualifies; only installing new
   // (compiled) grammars does — that path fails in the sandbox.
