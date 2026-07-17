@@ -48,21 +48,24 @@ export function treeHasNativeSignals(paths: string[]): boolean {
 // no-network WASI sandbox. Order defines "first match wins"; the hard-dep check
 // (which captures the offending module name) runs last.
 const DISQUALIFIERS: { re: RegExp; name: string }[] = [
-  // process / shell
+  // process / shell. `system(list)?` covers vim.fn.system + vim.fn.systemlist;
+  // termopen spawns a terminal process; jobstart spawns a job.
   { re: /\bjobstart\b/, name: "jobstart" },
-  { re: /\bvim\.fn\.system\s*\(/, name: "vim.fn.system" },
+  { re: /\bvim\.fn\.system(?:list)?\s*\(/, name: "vim.fn.system" },
+  { re: /\b(?:vim\.fn\.)?termopen\s*\(/, name: "termopen" },
   { re: /\bos\.execute\s*\(/, name: "os.execute" },
   { re: /\bio\.popen\s*\(/, name: "io.popen" },
   { re: /\bvim\.system\s*\(/, name: "vim.system" },
   // host network / libuv
   { re: /\b(?:vim\.loop|uv|vim\.uv)\.(?:new_tcp|new_udp|spawn)\b/, name: "libuv" },
-  // FFI
-  { re: /require\s*\(\s*['"]ffi['"]/, name: "ffi" },
+  // FFI. `\(?` so Lua's paren-less string-call sugar (`require 'ffi'`) is caught.
+  { re: /require\s*\(?\s*['"]ffi['"]/, name: "ffi" },
   // needs compiled parsers
   { re: /\bvim\.treesitter\b/, name: "vim.treesitter" },
 ];
 // Hard runtime deps that won't load in the sandbox. Capture group -> the name.
-const HARD_DEP_RE = /require\s*\(\s*['"](plenary|telescope|nvim-treesitter|mason|lspconfig)/;
+// `\(?` matches both require("x") and the paren-less require"x" / require 'x'.
+const HARD_DEP_RE = /require\s*\(?\s*['"](plenary|telescope|nvim-treesitter|mason|lspconfig)/;
 
 /** The first disqualifying flag found in `text`, or null if it looks clean. */
 export function sourceDisqualifier(text: string): string | null {
@@ -131,10 +134,15 @@ async function isRateLimitResponse(res: Response): Promise<boolean> {
   }
 }
 
-// Source files worth scanning for disqualifiers: entry points and Lua modules.
+// Source files worth scanning for disqualifiers: Lua modules and the Vimscript
+// runtime dirs where plugins put executable code (a jobstart in autoload/ or
+// ftplugin/ counts just as much as one in lua/).
 function isSourceCandidate(path: string): boolean {
-  if (/^plugin\/.+\.vim$/.test(path)) return true;
-  if (/^lua\/.+\.lua$/.test(path)) return true;
+  // Skip non-runtime dirs so test/doc code doesn't cause false positives or eat
+  // the file budget.
+  if (/(?:^|\/)(?:tests?|specs?|doc|docs)\//i.test(path)) return false;
+  if (/\.lua$/.test(path)) return true; // lua/**, plugin/*.lua, a top-level init.lua, …
+  if (/^(?:plugin|autoload|after|ftplugin|syntax|indent)\/.+\.vim$/.test(path)) return true;
   return false;
 }
 
@@ -249,6 +257,9 @@ export async function discoverMarketplace(
       } catch {
         continue;
       }
+      // Only take up to the remaining budget from this file, so a single large
+      // file can't push the per-repo scan far past MAX_SOURCE_BYTES.
+      bodyText = bodyText.slice(0, MAX_SOURCE_BYTES - bytes);
       text += "\n" + bodyText;
       bytes += bodyText.length;
       count++;

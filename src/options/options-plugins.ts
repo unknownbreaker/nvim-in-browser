@@ -188,14 +188,18 @@ function renderCard(p: PluginRecord): HTMLLIElement {
 async function renderMarketplace(installedNames: Set<string>): Promise<void> {
   const listEl = el<HTMLDivElement>("marketplace-list");
   const cache = await marketplaceStore.load();
-  const entries: ShelfEntry[] = cache && cache.plugins.length > 0 ? cache.plugins : CURATED_PLUGINS;
+  // Show discovered plugins only when a run actually produced some; otherwise
+  // (no cache, or a run that found nothing / was rate-limited) fall back to the
+  // bundled seed — and label it as the seed, not as a fresh "Updated" run.
+  const usingCache = Boolean(cache && cache.plugins.length > 0);
+  const entries: ShelfEntry[] = usingCache ? cache!.plugins : CURATED_PLUGINS;
   listEl.textContent = "";
   for (const entry of entries) {
     listEl.append(renderMarketplaceCard(entry, installedNames.has(entry.name)));
   }
-  el<HTMLSpanElement>("marketplace-updated").textContent = cache
-    ? `Updated ${relativeTime(cache.updatedAt)}`
-    : "Never — showing bundled list";
+  el<HTMLSpanElement>("marketplace-updated").textContent = usingCache
+    ? `Updated ${relativeTime(cache!.updatedAt)}`
+    : "Showing bundled list — run Update to discover plugins";
 }
 
 function renderMarketplaceCard(entry: ShelfEntry, installed: boolean): HTMLDivElement {

@@ -40,6 +40,9 @@ describe("sourceDisqualifier", () => {
   it("flags process/shell signals", () => {
     expect(sourceDisqualifier("vim.fn.jobstart({'ls'})")).toBe("jobstart");
     expect(sourceDisqualifier("local r = vim.fn.system('ls')")).toBe("vim.fn.system");
+    expect(sourceDisqualifier("local r = vim.fn.systemlist('git ls-files')")).toBe("vim.fn.system");
+    expect(sourceDisqualifier("vim.fn.termopen('bash')")).toBe("termopen");
+    expect(sourceDisqualifier("termopen({ 'bash' })")).toBe("termopen");
     expect(sourceDisqualifier("os.execute('rm -rf x')")).toBe("os.execute");
     expect(sourceDisqualifier("local h = io.popen('date')")).toBe("io.popen");
     expect(sourceDisqualifier("vim.system({'git'})")).toBe("vim.system");
@@ -52,6 +55,9 @@ describe("sourceDisqualifier", () => {
   it("flags ffi", () => {
     expect(sourceDisqualifier("local ffi = require('ffi')")).toBe("ffi");
     expect(sourceDisqualifier('local ffi = require("ffi")')).toBe("ffi");
+    // Lua's paren-less string-call sugar must not slip through.
+    expect(sourceDisqualifier("local ffi = require 'ffi'")).toBe("ffi");
+    expect(sourceDisqualifier('local ffi = require"ffi"')).toBe("ffi");
   });
   it("flags vim.treesitter (needs compiled parsers)", () => {
     expect(sourceDisqualifier("vim.treesitter.get_parser(0)")).toBe("vim.treesitter");
@@ -62,6 +68,8 @@ describe("sourceDisqualifier", () => {
     expect(sourceDisqualifier("require('nvim-treesitter.configs')")).toBe("nvim-treesitter");
     expect(sourceDisqualifier("require('mason')")).toBe("mason");
     expect(sourceDisqualifier("require('lspconfig')")).toBe("lspconfig");
+    // Paren-less require too.
+    expect(sourceDisqualifier("local t = require'telescope'")).toBe("telescope");
   });
   it("returns null for clean pure-Lua source", () => {
     expect(
