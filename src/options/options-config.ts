@@ -222,21 +222,26 @@ async function onFormat(): Promise<void> {
     status(`No formatter for ${current} — Lua (.lua) and Vimscript (.vim) only.`, "info");
     return;
   }
+  // Capture the file: formatting Lua is async (StyLua's wasm can take seconds to
+  // load on first use), and the user could click a different file meanwhile. If
+  // they do, we must not write the result into the now-different editor.
+  const file = current;
   const btn = el<HTMLButtonElement>("config-format");
   btn.disabled = true;
-  status(`Formatting ${current}…`, "info");
+  status(`Formatting ${file}…`, "info");
   try {
     const src = el<HTMLTextAreaElement>("editor").value;
     const out = lang === "lua" ? await formatLua(src) : formatVim(src);
+    if (current !== file) return; // switched files mid-format — abandon
     if (out === src) {
-      status(`${current} already formatted ✓`, "ok");
+      status(`${file} already formatted ✓`, "ok");
       return;
     }
     el<HTMLTextAreaElement>("editor").value = out;
     editorSet();
     syncSaveButton();
     scheduleAutosave();
-    status(`Formatted ${current} ✓`, "ok");
+    status(`Formatted ${file} ✓`, "ok");
   } catch (err) {
     status(`Format failed: ${describe(err)} — code left unchanged.`, "err");
   } finally {
@@ -247,21 +252,26 @@ async function onFormat(): Promise<void> {
 async function onSave(): Promise<void> {
   clearTimeout(autosaveTimer); // a manual save preempts the pending autosave
   el<HTMLButtonElement>("save").disabled = true;
+  // Capture the file up front: format-on-save adds an async gap (StyLua's wasm
+  // can take seconds to load), during which the user could switch files. Saving
+  // to `current` after a switch would clobber the newly-selected file.
+  const file = current;
   try {
     let value = el<HTMLTextAreaElement>("editor").value;
     // Format-on-save applies to the explicit Save only (not the background
     // autosave, which must never rewrite text mid-typing).
     if (formatOnSaveEnabled()) {
-      const formatted = await tryFormat(current, value);
+      const formatted = await tryFormat(file, value);
+      if (current !== file) return; // switched files mid-format — abandon this save
       if (formatted !== null && formatted !== value) {
         value = formatted;
         el<HTMLTextAreaElement>("editor").value = value;
         editorSet();
       }
     }
-    await store.saveFile(current, value);
+    await store.saveFile(file, value);
     savedValue = value;
-    status(`Saved ${current} ✓ (reload your editor tab to apply)`, "ok");
+    status(`Saved ${file} ✓ (reload your editor tab to apply)`, "ok");
     await refreshList();
   } catch (err) {
     status(`Save failed: ${describe(err)}`, "err");
