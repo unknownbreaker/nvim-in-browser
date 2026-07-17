@@ -24,6 +24,12 @@ describe("treeHasNativeSignals", () => {
     expect(treeHasNativeSignals(["addon.node"])).toBe(true);
     expect(treeHasNativeSignals(["grammar.wasm"])).toBe(true);
   });
+  it("flags python build files, a static lib, and a remote-plugin host dir", () => {
+    expect(treeHasNativeSignals(["pyproject.toml"])).toBe(true);
+    expect(treeHasNativeSignals(["setup.py"])).toBe(true);
+    expect(treeHasNativeSignals(["libfoo.a"])).toBe(true);
+    expect(treeHasNativeSignals(["rplugin/python3/foo.py"])).toBe(true);
+  });
   it("passes a plain Lua tree and plain treesitter queries (*.scm only)", () => {
     expect(
       treeHasNativeSignals([
@@ -59,8 +65,30 @@ describe("sourceDisqualifier", () => {
     expect(sourceDisqualifier("local ffi = require 'ffi'")).toBe("ffi");
     expect(sourceDisqualifier('local ffi = require"ffi"')).toBe("ffi");
   });
-  it("flags vim.treesitter (needs compiled parsers)", () => {
-    expect(sourceDisqualifier("vim.treesitter.get_parser(0)")).toBe("vim.treesitter");
+  it("flags sockets / channels and LSP clients", () => {
+    expect(sourceDisqualifier("vim.fn.sockconnect('tcp', 'x:1')")).toBe("sockets/channels");
+    expect(sourceDisqualifier("vim.fn.serverstart()")).toBe("sockets/channels");
+    expect(sourceDisqualifier("vim.lsp.start({ name = 'x' })")).toBe("vim.lsp.start");
+    expect(sourceDisqualifier("vim.lsp.start_client({})")).toBe("vim.lsp.start");
+    expect(sourceDisqualifier("vim.lsp.enable('luals')")).toBe("vim.lsp.start");
+    expect(sourceDisqualifier("vim.uv.getaddrinfo('host')")).toBe("libuv");
+  });
+  it("flags native library loading (loadlib + C-extension modules)", () => {
+    expect(sourceDisqualifier("package.loadlib('x.so', 'luaopen_x')")).toBe("package.loadlib");
+    expect(sourceDisqualifier("local s = require('socket')")).toBe("native-lua-module");
+    expect(sourceDisqualifier("require('socket.http')")).toBe("native-lua-module");
+    expect(sourceDisqualifier("require('cjson')")).toBe("native-lua-module");
+    // lpeg + luv are statically linked into core Neovim — NOT native-lua-module.
+    expect(sourceDisqualifier("local lpeg = require('lpeg')")).toBeNull();
+    expect(sourceDisqualifier("local uv = require('luv')")).toBeNull();
+  });
+  it("does NOT flag bare vim.treesitter (7 grammars ship in the engine)", () => {
+    // The engine bundles c/lua/vim/vimdoc/query/markdown/markdown_inline, so
+    // plain treesitter use is compatible; only installing new parsers is not.
+    expect(sourceDisqualifier("vim.treesitter.get_parser(0)")).toBeNull();
+    expect(sourceDisqualifier("vim.treesitter.query.parse('lua', q)")).toBeNull();
+    expect(sourceDisqualifier("vim.cmd(':TSInstall rust')")).toBe("treesitter-install");
+    expect(sourceDisqualifier("build = ':TSUpdate'")).toBe("treesitter-install");
   });
   it("flags hard deps that won't load, returning the dep name", () => {
     expect(sourceDisqualifier("local p = require('plenary.async')")).toBe("plenary");
@@ -68,6 +96,9 @@ describe("sourceDisqualifier", () => {
     expect(sourceDisqualifier("require('nvim-treesitter.configs')")).toBe("nvim-treesitter");
     expect(sourceDisqualifier("require('mason')")).toBe("mason");
     expect(sourceDisqualifier("require('lspconfig')")).toBe("lspconfig");
+    expect(sourceDisqualifier("require('gitsigns')")).toBe("gitsigns");
+    expect(sourceDisqualifier("require('nvim-dap')")).toBe("nvim-dap");
+    expect(sourceDisqualifier("require('null-ls')")).toBe("null-ls");
     // Paren-less require too.
     expect(sourceDisqualifier("local t = require'telescope'")).toBe("telescope");
   });
