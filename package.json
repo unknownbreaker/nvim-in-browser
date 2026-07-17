@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",
+    "@johnnymorganz/stylua": "2.5.2",
     "@msgpack/msgpack": "^3.0.0"
   },
   "devDependencies": {

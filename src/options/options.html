@@ -33,9 +33,15 @@
         line-height: 1.5;
       }
       main {
-        max-width: 980px;
+        max-width: 1200px;
         margin: 0 auto;
         padding: 32px 24px 64px;
+      }
+      /* Keep prose readable even as the page widens for the code editor: notes
+         and taglines stop at a comfortable measure instead of stretching. */
+      .tagline,
+      .note {
+        max-width: 760px;
       }
       h1 {
         font-size: 1.5rem;
@@ -61,7 +67,7 @@
       }
       textarea#editor {
         width: 100%;
-        min-height: 340px;
+        min-height: 460px;
         resize: vertical;
         /* block, not the default inline-block: otherwise the wrapper's line box
            adds ~5px of baseline descent below the textarea and the behind-<pre>
@@ -611,9 +617,9 @@
               <ul
                 id="config-list"
                 title="Your saved config files. Click one to edit it."
-                style="list-style: none; padding: 0; margin: 0; flex: 1 1 180px; min-width: 160px"
+                style="list-style: none; padding: 0; margin: 0; flex: 0 0 210px; min-width: 160px; align-self: flex-start"
               ></ul>
-              <div style="flex: 3 1 360px; min-width: 0">
+              <div style="flex: 1 1 auto; min-width: 0">
                 <label class="field-label" id="config-editing-label" for="editor">init.lua</label>
                 <textarea
                   id="editor"
@@ -625,8 +631,12 @@
                 ></textarea>
                 <div class="row">
                   <button id="save" class="primary" type="button" title="Save the current file to the browser (reload your editor tab to apply).">Save file</button>
+                  <button id="config-format" type="button" title="Format the current file — StyLua for .lua, a conservative reindent for .vim. Leaves code unchanged if it can't be parsed.">Format</button>
                   <button id="config-rename" type="button" title="Rename the current file.">Rename</button>
                   <button id="config-delete" class="danger" type="button" title="Delete the current file from the browser.">Delete file</button>
+                  <label class="control" title="Format Lua/Vimscript automatically each time you Save (not while autosaving)." style="margin-left: auto">
+                    <input id="format-on-save" type="checkbox" /> Format on save
+                  </label>
                 </div>
               </div>
             </div>
