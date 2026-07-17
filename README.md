@@ -21,10 +21,13 @@ Design: [docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md](docs/super
    the page gains focus or becomes visible (browsers only grant clipboard reads
    to the focused document), so a paste reflects the clipboard as of the last
    focus/visibility sync, not always the instant of the paste.
-4. **Overlay:** focus any `<textarea>` or text-like `<input>` and press
+4. **Overlay:** focus any `<textarea>`, text-like `<input>`, or a supported
+   in-page code editor (Monaco, CodeMirror 5, CodeMirror 6) and press
    `Ctrl+Shift+E`. Edits sync back live (debounced), so **your text is written
    into the underlying web page's field automatically as you type** — that is
-   the only "save," and it's continuous.
+   the only "save," and it's continuous. (Code editors are reached through a
+   main-world bridge, since their live instances aren't visible to a content
+   script; CodeMirror 6 support is best-effort and version-dependent.)
    - **Closing:** use **`:q!`**, or the escape chord `Ctrl+Shift+Esc` (the chord
      always works, even if your config wedges the editor). Plain `:q` is
      *rejected* — the buffer is always "modified", so Neovim refuses to quit

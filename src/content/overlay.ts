@@ -1,9 +1,19 @@
-// Content script: overlays a real-Neovim editing surface (the extension's
-// engine-frame iframe, in ?mode=embed) onto the focused textarea / eligible
-// text input of any page. Activation is driven by the background service worker
+// Content script (ISOLATED world): overlays a real-Neovim editing surface (the
+// extension's engine-frame iframe, in ?mode=embed) onto the focused editing
+// surface of any page. Activation is driven by the background service worker
 // (keyboard command -> chrome.tabs.sendMessage {type:"nvim-activate"}). Buffer
-// edits stream back from the frame and are written into the underlying field
-// through the native value setter so React/Vue controlled inputs notice.
+// edits stream back from the frame and are written into the underlying surface.
+//
+// Two kinds of target are supported behind a single `TextTarget` abstraction:
+//   T0  plain value fields — <textarea> / eligible <input>. Read via `.value`,
+//       written via the native value setter + synthetic input event so
+//       React/Vue controlled inputs notice.
+//   T1  framework code editors — Monaco / CodeMirror 5 / CodeMirror 6. Their
+//       live instances live in the page's MAIN world, which a content script
+//       cannot see, so read/write is delegated to a MAIN-world bridge
+//       (src/content/editor-bridge-main.ts) over same-window postMessage. The
+//       target element is handed across the world boundary by tagging it with
+//       `data-nvim-editor="<nonce>"`; the bridge resolves it via querySelector.
 //
 // Bundled as an IIFE (see scripts/build.mjs) because content scripts cannot be
 // ES modules.
@@ -25,20 +35,29 @@ const ELIGIBLE_INPUT_TYPES = new Set(["text", "search", "url", "email", "tel"]);
 // paths are messages *from* that same frame.
 const BOOT_WATCHDOG_MS = 20_000;
 
-type Target = HTMLTextAreaElement | HTMLInputElement;
-let active: { frame: HTMLIFrameElement; target: Target } | null = null;
+// How long the isolated overlay waits for the MAIN-world bridge to answer a
+// read/write request. If the bridge script never loaded (or the page has no
+// live editor at the tagged element), resolveTarget must not hang forever.
+const BRIDGE_TIMEOUT_MS = 3000;
 
-function eligibleTarget(): Target | null {
-  const el = document.activeElement;
-  if (el instanceof HTMLTextAreaElement) return el;
-  if (el instanceof HTMLInputElement && ELIGIBLE_INPUT_TYPES.has(el.type)) return el;
-  return null;
+// A uniform handle over whatever the overlay is editing. `element` is the box
+// the overlay is positioned + size-tracked against; `write` applies buffer text
+// back to the underlying surface; `cleanup` releases any per-target state (e.g.
+// the framework path's `data-nvim-editor` tag) on deactivate.
+interface TextTarget {
+  element: HTMLElement;
+  initialText: string;
+  filetype: string | undefined;
+  write(text: string): void;
+  cleanup(): void;
 }
+
+let active: { frame: HTMLIFrameElement; target: TextTarget } | null = null;
 
 // React/Vue controlled components ignore plain `.value` writes because they
 // track their own state; go through the native prototype setter and fire a
 // synthetic bubbling input event so the framework's onChange sees the change.
-function setNativeValue(el: Target, value: string): void {
+function setNativeValue(el: HTMLTextAreaElement | HTMLInputElement, value: string): void {
   const proto =
     el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
@@ -46,7 +65,95 @@ function setNativeValue(el: Target, value: string): void {
   el.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-function positionFrame(frame: HTMLIFrameElement, target: Target): void {
+// Descend through OPEN shadow roots to the truly-focused element. Monaco / CM
+// (and many web components) place the real editing surface inside a shadow
+// root, so document.activeElement stops at the host. We do NOT cross iframe
+// boundaries here (a cross-origin iframe can't be reached, and same-origin
+// iframe focus is handled by the "embedded frames" notice path).
+function deepActiveElement(): HTMLElement | null {
+  let el = document.activeElement;
+  while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+  return el instanceof HTMLElement ? el : null;
+}
+
+// One-shot request/response to the MAIN-world bridge over same-window
+// postMessage. Resolves with the bridge's response object, or a synthetic
+// `{ok:false, reason:"timeout"}` if it never answers within BRIDGE_TIMEOUT_MS.
+// Always tears down its own listener + timer so a slow/absent bridge can't leak.
+let bridgeReqSeq = 0;
+function bridgeRequest(
+  op: "read" | "write",
+  nonce: string,
+  text?: string,
+): Promise<{ ok: boolean; text?: string; filetype?: string; reason?: string }> {
+  const id = ++bridgeReqSeq;
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const done = (res: { ok: boolean; text?: string; filetype?: string; reason?: string }): void => {
+      window.removeEventListener("message", onMessage);
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      resolve(res);
+    };
+    const onMessage = (ev: MessageEvent): void => {
+      if (ev.source !== window) return;
+      if (ev.data?.source !== "nvim-bridge-res" || ev.data.id !== id) return;
+      done(ev.data);
+    };
+    window.addEventListener("message", onMessage);
+    timer = setTimeout(() => done({ ok: false, reason: "timeout" }), BRIDGE_TIMEOUT_MS);
+    window.postMessage({ source: "nvim-bridge-req", id, op, nonce, text }, "*");
+  });
+}
+
+// Resolve the current activation target, if any. Order matters: framework code
+// editors (Monaco/CM) focus a HIDDEN <textarea> or contenteditable, so the
+// framework check MUST precede the plain value-field check — otherwise we would
+// treat Monaco's hidden inputarea as a plain textarea and write into a `.value`
+// the editor ignores.
+async function resolveTarget(): Promise<TextTarget | null> {
+  const el = deepActiveElement();
+
+  // 1. Framework code editors (Monaco / CM5 / CM6) via the MAIN-world bridge.
+  const container = el?.closest?.(".monaco-editor, .CodeMirror, .cm-editor");
+  if (container instanceof HTMLElement) {
+    const nonce = crypto.randomUUID();
+    container.setAttribute("data-nvim-editor", nonce);
+    const res = await bridgeRequest("read", nonce);
+    if (!res.ok || typeof res.text !== "string") {
+      container.removeAttribute("data-nvim-editor");
+      return null;
+    }
+    return {
+      element: container,
+      initialText: res.text,
+      filetype: res.filetype || filetypeForHost(location.hostname),
+      write: (t) => void bridgeRequest("write", nonce, t),
+      cleanup: () => container.removeAttribute("data-nvim-editor"),
+    };
+  }
+
+  // 2. Plain value field: <textarea> or an eligible <input>.
+  if (
+    el instanceof HTMLTextAreaElement ||
+    (el instanceof HTMLInputElement && ELIGIBLE_INPUT_TYPES.has(el.type))
+  ) {
+    const field = el;
+    return {
+      element: field,
+      initialText: field.value,
+      filetype: filetypeForHost(location.hostname),
+      write: (t) => setNativeValue(field, t),
+      cleanup: () => {},
+    };
+  }
+
+  return null;
+}
+
+function positionFrame(frame: HTMLIFrameElement, target: HTMLElement): void {
   const rect = target.getBoundingClientRect();
   const minH = 220; // comfortable multi-row strip even over a small input
   frame.style.cssText = [
@@ -153,22 +260,46 @@ function showNotice(message: string, withScratchAction: boolean): void {
   }
 }
 
-function activate(): void {
-  if (active) return;
-  const target = eligibleTarget();
-  if (!target) {
-    if (document.activeElement?.tagName === "IFRAME") {
-      showNotice("Can't edit fields inside embedded frames. Open the scratch page instead?", true);
-    } else {
-      showNotice("Focus a text field first, or open the scratch page.", true);
-    }
-    return;
-  }
+// Synchronous re-entrancy guard for activate(). `active` alone is not enough:
+// resolveTarget() awaits the bridge, so two activations could both pass the
+// `if (active)` check before either sets it. This flag closes that window.
+let activating = false;
 
+async function activate(): Promise<void> {
+  if (active || activating) return;
+  activating = true;
+  try {
+    const target = await resolveTarget();
+    if (!target) {
+      if (document.activeElement?.tagName === "IFRAME") {
+        showNotice(
+          "Can't edit fields inside embedded frames. Open the scratch page instead?",
+          true,
+        );
+      } else {
+        showNotice(
+          "Focus a text field or a supported code editor first, or open the scratch page.",
+          true,
+        );
+      }
+      return;
+    }
+    startOverlay(target);
+  } finally {
+    activating = false;
+  }
+}
+
+// Build the engine-frame overlay for a resolved target and wire its full
+// lifecycle: boot watchdog, message plumbing, seed on load, reposition/resize
+// tracking, escape-chord guard, and deactivate. This is the T0 overlay body,
+// generalized to drive `target` (element / initialText / filetype / write /
+// cleanup) instead of a bare textarea.
+function startOverlay(target: TextTarget): void {
   const frame = document.createElement("iframe");
   frame.src = chrome.runtime.getURL("engine-frame.html?mode=embed");
   frame.allow = "clipboard-read; clipboard-write";
-  positionFrame(frame, target);
+  positionFrame(frame, target.element);
   document.body.appendChild(frame);
   active = { frame, target };
 
@@ -190,9 +321,9 @@ function activate(): void {
     const m = ev.data;
     if (m?.type === "nvim-ready" || m?.type === "nvim-text") clearWatchdog();
     if (m?.type === "nvim-text" && active) {
-      setNativeValue(active.target, m.text);
+      active.target.write(m.text);
     } else if (m?.type === "nvim-deactivate") {
-      if (typeof m.text === "string" && active) setNativeValue(active.target, m.text);
+      if (typeof m.text === "string" && active) active.target.write(m.text);
       deactivate();
     }
   };
@@ -200,7 +331,7 @@ function activate(): void {
 
   const onLoad = (): void => {
     frame.contentWindow?.postMessage(
-      { type: "nvim-init", text: target.value, filetype: filetypeForHost(location.hostname) },
+      { type: "nvim-init", text: target.initialText, filetype: target.filetype },
       "*",
     );
     frame.contentWindow?.focus();
@@ -208,12 +339,12 @@ function activate(): void {
   frame.addEventListener("load", onLoad);
 
   const reposition = (): void => {
-    if (active) positionFrame(active.frame, active.target);
+    if (active) positionFrame(active.frame, active.target.element);
   };
   window.addEventListener("scroll", reposition, true);
   window.addEventListener("resize", reposition);
 
-  // Track the target FIELD's own size, not just the viewport. Dragging a
+  // Track the target ELEMENT's own size, not just the viewport. Dragging a
   // textarea's resize grip, a responsive relayout, or a JS-driven size change
   // fires no window "resize" event, so a ResizeObserver on the target is what
   // keeps the overlay matching the field's box across all of those. (The scroll
@@ -221,7 +352,7 @@ function activate(): void {
   // reflows or scrolls.) positionFrame recomputes width/height too, so the
   // overlay follows both size and position from one callback.
   const sizeObserver = new ResizeObserver(reposition);
-  sizeObserver.observe(target);
+  sizeObserver.observe(target.element);
 
   // Escape-chord escape hatch: while the overlay is active the chord is
   // normally consumed inside the (focused) iframe, which posts back
@@ -250,12 +381,13 @@ function activate(): void {
     const t = active?.target;
     active?.frame.remove();
     active = null;
-    t?.focus();
+    t?.cleanup();
+    t?.element.focus();
   }
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === "nvim-activate") activate();
+  if (msg?.type === "nvim-activate") void activate();
 });
 
 // Test-only activation path for the headless browser smoke, where the real
@@ -273,6 +405,6 @@ if (__NVIM_TEST_HOOKS__) {
     if (ev.source !== window) return;
     if (ev.data?.type !== "nvim-activate-test") return;
     if (document.documentElement.dataset.nvimTestHook !== "1") return;
-    activate();
+    void activate();
   });
 }
