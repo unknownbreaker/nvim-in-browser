@@ -50,6 +50,11 @@ interface TextTarget {
   filetype: string | undefined;
   write(text: string): void;
   cleanup(): void;
+  // Restore focus to the underlying editable on deactivate. For a framework
+  // editor this is the originally-focused input (a hidden textarea / the
+  // contenteditable), NOT the container element (which is usually not
+  // focusable), so the cursor returns to the editor when the overlay closes.
+  refocus(): void;
 }
 
 let active: { frame: HTMLIFrameElement; target: TextTarget } | null = null;
@@ -132,6 +137,8 @@ async function resolveTarget(): Promise<TextTarget | null> {
       filetype: res.filetype || filetypeForHost(location.hostname),
       write: (t) => void bridgeRequest("write", nonce, t),
       cleanup: () => container.removeAttribute("data-nvim-editor"),
+      // Refocus the actual editor input (el), not the container.
+      refocus: () => el?.focus?.(),
     };
   }
 
@@ -147,6 +154,7 @@ async function resolveTarget(): Promise<TextTarget | null> {
       filetype: filetypeForHost(location.hostname),
       write: (t) => setNativeValue(field, t),
       cleanup: () => {},
+      refocus: () => field.focus(),
     };
   }
 
@@ -382,7 +390,7 @@ function startOverlay(target: TextTarget): void {
     active?.frame.remove();
     active = null;
     t?.cleanup();
-    t?.element.focus();
+    t?.refocus();
   }
 }
 
