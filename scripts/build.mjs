@@ -49,6 +49,23 @@ await build({
   define,
 });
 
+// Main-world editor bridge (T1): a separate content-script entry injected into
+// the page's MAIN world (manifest `"world":"MAIN"`) so it can reach live
+// Monaco / CodeMirror instances the isolated overlay can't see. Bundled as an
+// IIFE for the same reason content.js is (a content script is never an ESM).
+await build({
+  entryPoints: [
+    { in: path.join(root, "src", "content", "editor-bridge-main.ts"), out: "editor-bridge" },
+  ],
+  outdir: outDir,
+  bundle: true,
+  format: "iife",
+  target: "chrome120",
+  sourcemap: false,
+  minify: true,
+  define,
+});
+
 await cp(path.join(root, "src", "scratch", "scratch.html"), path.join(outDir, "scratch.html"));
 await cp(path.join(root, "src", "options", "options.html"), path.join(outDir, "options.html"));
 await cp(

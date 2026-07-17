@@ -30,6 +30,15 @@
 //  12. Field-resize tracking: growing the textarea ELEMENT (fires no window
 //      "resize" event) grows the overlay to match, proving the
 //      ResizeObserver-on-target repositions/resizes the overlay.
+//  13. T1 bridge phase (fast, NO engine): on framework-editors.html, for each
+//      mock editor (Monaco, CM5, CM6) the MAIN-world bridge resolves the tagged
+//      container and returns the mock's initial text (+ filetype where the
+//      adapter exposes one), and a bridge `write` updates the mock's recorded
+//      value — proving all three read/write adapters end-to-end.
+//  14. T1 integration (with engine): focusing the CM5 mock's hidden textarea and
+//      activating seeds the engine buffer with the CM5 mock's initial text (the
+//      bridge read reached the engine); a mid-session edit writes back through
+//      the bridge to the mock's setValue; the escape chord removes the overlay.
 //
 // Browser + extension-load handling mirrors scripts/browser-smoke.mjs.
 //
@@ -250,6 +259,51 @@ function overlayRectInfo(page) {
     const t = field.getBoundingClientRect();
     return { fLeft: f.left, fTop: f.top, fHeight: f.height, tLeft: t.left, tTop: t.top };
   }, page.__fieldId);
+}
+
+// Drive one full MAIN-world bridge round-trip from the PAGE (which is itself
+// the main world, same as the bridge): tag the container with data-nvim-editor,
+// post a `read` request, then a `write` request, and resolve with both
+// responses. Mirrors exactly what the isolated overlay's bridgeRequest does,
+// but without the engine — this exercises the bridge adapters directly.
+function bridgeRoundtrip(page, selector, writeText) {
+  return page.evaluate(
+    ({ selector, writeText }) =>
+      new Promise((resolve, reject) => {
+        const nonce = "smoke-" + Math.random().toString(36).slice(2);
+        const container = document.querySelector(selector);
+        if (!container) {
+          reject(new Error(`no element for selector ${selector}`));
+          return;
+        }
+        container.setAttribute("data-nvim-editor", nonce);
+        const out = {};
+        const timer = setTimeout(() => {
+          window.removeEventListener("message", onMsg);
+          reject(new Error(`bridge timed out for ${selector}`));
+        }, 3000);
+        function onMsg(ev) {
+          if (ev.source !== window) return;
+          if (ev.data?.source !== "nvim-bridge-res") return;
+          if (ev.data.id === 1) {
+            out.read = ev.data;
+            window.postMessage(
+              { source: "nvim-bridge-req", id: 2, op: "write", nonce, text: writeText },
+              "*",
+            );
+          } else if (ev.data.id === 2) {
+            out.write = ev.data;
+            clearTimeout(timer);
+            window.removeEventListener("message", onMsg);
+            container.removeAttribute("data-nvim-editor");
+            resolve(out);
+          }
+        }
+        window.addEventListener("message", onMsg);
+        window.postMessage({ source: "nvim-bridge-req", id: 1, op: "read", nonce }, "*");
+      }),
+    { selector, writeText },
+  );
 }
 
 async function run(exec, headless, id, baseUrl) {
@@ -523,6 +577,76 @@ async function run(exec, headless, id, baseUrl) {
     await sendEscapeChord(frame);
     await wait(600);
 
+    // ---- Case 9: T1 bridge phase (fast, NO engine) ------------------------
+    // Navigate to the framework-editors fixture, whose own main-world script
+    // installs mock Monaco / CM5 / CM6 editors. The MAIN-world bridge (also main
+    // world) must resolve each tagged container and read the mock's initial text
+    // (+ filetype where the adapter exposes it), and a bridge `write` must reach
+    // the mock's setValue/dispatch. No engine is booted for this phase.
+    console.log("[bridge] navigating to framework-editors.html...");
+    await page.goto(`${baseUrl}/framework-editors.html`, { waitUntil: "load" });
+    await wait(400);
+    await page.waitForFunction("window.__nvimBridgeInstalled === true", { timeout: 8_000 });
+    const mocks = await page.evaluate(() => window.__mocks);
+
+    const bridgeCases = [
+      { name: "monaco", selector: ".monaco-editor", initial: mocks.monacoInitial, filetype: "javascript", lastSetKey: "monacoLastSet", write: "monaco written text" },
+      { name: "cm5", selector: ".CodeMirror", initial: mocks.cm5Initial, filetype: "javascript", lastSetKey: "cm5LastSet", write: "cm5 written text" },
+      // CM6's read adapter does not report a filetype (no reliable path), so we
+      // don't assert one here.
+      { name: "cm6", selector: ".cm-editor", initial: mocks.cm6Initial, filetype: undefined, lastSetKey: "cm6LastSet", write: "cm6 written text" },
+    ];
+    for (const c of bridgeCases) {
+      const res = await bridgeRoundtrip(page, c.selector, c.write);
+      console.log(`[bridge:${c.name}] read -> ${JSON.stringify(res.read)} write -> ${JSON.stringify(res.write)}`);
+      if (!res.read?.ok || res.read.text !== c.initial)
+        return { ok: false, reason: `bridge ${c.name} read wrong: ${JSON.stringify(res.read)}` };
+      if (c.filetype !== undefined && res.read.filetype !== c.filetype)
+        return { ok: false, reason: `bridge ${c.name} filetype wrong: ${JSON.stringify(res.read.filetype)}` };
+      if (!res.write?.ok)
+        return { ok: false, reason: `bridge ${c.name} write not ok: ${JSON.stringify(res.write)}` };
+      const lastSet = await page.evaluate((k) => window.__mocks[k], c.lastSetKey);
+      if (lastSet !== c.write)
+        return { ok: false, reason: `bridge ${c.name} write did not update mock (${c.lastSetKey}=${JSON.stringify(lastSet)})` };
+      console.log(`[bridge:${c.name}] ASSERT OK: read initial + write-back reached the mock`);
+    }
+    console.log("[bridge] ASSERT OK: Monaco + CM5 + CM6 adapters read/write end-to-end");
+
+    // ---- Case 10: T1 integration (with engine) ----------------------------
+    // Focus the CM5 mock's hidden textarea and activate. The overlay must
+    // resolve the .CodeMirror container via the framework path, seed the engine
+    // buffer from the bridge read (== the mock's initial text), and — on a
+    // mid-session edit — write back through the bridge to the mock's setValue.
+    // Reload the fixture so the mocks reset to their initial values (the bridge
+    // phase above wrote into them), giving the integration a clean starting buffer.
+    console.log("[t1-integration] reloading fixture + activating on CM5 mock's textarea...");
+    await page.goto(`${baseUrl}/framework-editors.html`, { waitUntil: "load" });
+    await wait(400);
+    frame = await activateOn(page, "cm5ta");
+    const t1Buf = await frame.evaluate(() => window.__nvim.getBufferText());
+    console.log(`[t1-integration] engine buffer -> ${JSON.stringify(t1Buf)}`);
+    if (t1Buf !== mocks.cm5Initial)
+      return { ok: false, reason: `bridge read did not seed engine buffer: ${JSON.stringify(t1Buf)}` };
+    console.log("[t1-integration] ASSERT OK: engine buffer seeded from CM5 mock via bridge read");
+
+    // Append text in the engine, then wait past the 300ms debounce so the
+    // nvim-text sync fires and the overlay writes back through the bridge.
+    await frame.evaluate(() => window.__nvim.input("A EDITED"));
+    await frame.evaluate(() => window.__nvim.input("<Esc>"));
+    await wait(SYNC_WAIT_MS);
+    const cm5Written = await page.evaluate(() => window.__mocks.cm5LastSet);
+    console.log(`[t1-integration] CM5 mock setValue received -> ${JSON.stringify(cm5Written)}`);
+    if (cm5Written !== `${mocks.cm5Initial} EDITED`)
+      return { ok: false, reason: `bridge write-back did not reach CM5 setValue: ${JSON.stringify(cm5Written)}` };
+    console.log("[t1-integration] ASSERT OK: mid-session edit wrote back through the bridge to CM5 setValue");
+
+    await sendEscapeChord(frame);
+    await wait(600);
+    const t1Gone = await page.evaluate(() => !document.querySelector('iframe[src*="engine-frame.html"]'));
+    if (!t1Gone)
+      return { ok: false, reason: "T1 overlay iframe not removed on deactivate" };
+    console.log("[t1-integration] ASSERT OK: escape chord removed the overlay");
+
     await browser.close();
     return { ok: true };
   } catch (e) {
@@ -578,7 +702,8 @@ async function main() {
 
     console.log(
       "\nPASS: overlay activation, debounced sync, deactivate, input + password cases, " +
-        "IME composition, hostile-page notice, filetype-apply mechanism, and field-resize tracking",
+        "IME composition, hostile-page notice, filetype-apply mechanism, field-resize tracking, " +
+        "T1 bridge phase (Monaco + CM5 + CM6 read/write), and T1 engine integration (CM5)",
     );
   } finally {
     console.log("restoring production dist/chromium (test hooks disabled)...");

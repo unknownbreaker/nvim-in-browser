@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>framework editors fixture</title>
+  </head>
+  <body>
+    <h1>framework editors fixture</h1>
+
+    <!-- Monaco: the real editor focuses a hidden .inputarea textarea. -->
+    <div class="monaco-editor">
+      <textarea class="inputarea"></textarea>
+    </div>
+
+    <!-- CodeMirror 5: the instance hangs off the .CodeMirror node. -->
+    <div class="CodeMirror">
+      <textarea id="cm5ta"></textarea>
+    </div>
+
+    <!-- CodeMirror 6: contenteditable .cm-content inside a .cm-editor root. -->
+    <div class="cm-editor">
+      <div class="cm-content" contenteditable="true"></div>
+    </div>
+
+    <script>
+      // These mock editors are installed by the PAGE's own main-world script so
+      // the MAIN-world bridge (also main world) can reach them exactly as it
+      // would reach real Monaco / CodeMirror instances. Each mock records the
+      // last value written through it and exposes it on window.__mocks so the
+      // smoke can assert both the read (initial text) and the write-back.
+      const mocks = {
+        monacoInitial: "monaco initial text",
+        cm5Initial: "cm5 initial text",
+        cm6Initial: "cm6 initial text",
+        monacoLastSet: null,
+        cm5LastSet: null,
+        cm6LastSet: null,
+      };
+      window.__mocks = mocks;
+
+      // ---- Monaco mock -----------------------------------------------------
+      let monacoValue = mocks.monacoInitial;
+      const monacoModel = {
+        getValue: () => monacoValue,
+        setValue: (v) => {
+          monacoValue = v;
+          mocks.monacoLastSet = v;
+        },
+        getLanguageId: () => "javascript",
+      };
+      const monacoEd = {
+        getContainerDomNode: () => document.querySelector(".monaco-editor"),
+        getModel: () => monacoModel,
+      };
+      window.monaco = { editor: { getEditors: () => [monacoEd] } };
+
+      // ---- CodeMirror 5 mock -----------------------------------------------
+      let cm5Value = mocks.cm5Initial;
+      document.querySelector(".CodeMirror").CodeMirror = {
+        getValue: () => cm5Value,
+        setValue: (v) => {
+          cm5Value = v;
+          mocks.cm5LastSet = v;
+        },
+        getOption: (o) => (o === "mode" ? "javascript" : undefined),
+      };
+
+      // ---- CodeMirror 6 mock -----------------------------------------------
+      let cm6Value = mocks.cm6Initial;
+      const cm6View = {
+        state: {
+          doc: {
+            toString: () => cm6Value,
+            get length() {
+              return cm6Value.length;
+            },
+          },
+        },
+        // Apply the single replace-all change the bridge dispatches and record it.
+        dispatch: (spec) => {
+          const ch = spec.changes;
+          cm6Value = cm6Value.slice(0, ch.from) + ch.insert + cm6Value.slice(ch.to);
+          mocks.cm6LastSet = cm6Value;
+        },
+      };
+      document.querySelector(".cm-editor").cmView = { view: cm6View };
+    </script>
+  </body>
+</html>
