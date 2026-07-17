@@ -124,6 +124,29 @@ const postDeactivateFinal = (): void => {
 
 const { cols, rows } = renderer.gridForSize(innerWidth, innerHeight);
 
+// Keep nvim's grid sized to the frame. When the parent resizes the overlay
+// iframe (it tracks the underlying field) — or the scratch window resizes — the
+// iframe's own window fires a `resize` event. We recompute the grid from the new
+// viewport and tell nvim to resize its UI; nvim replies with `grid_resize`, which
+// the renderer applies (growing the canvas to fill). Debounced so dragging a
+// resize handle doesn't flood the engine, and gated so it's a no-op when there's
+// no live engine (pre-ready, sleeping, or memory-capped). References the current
+// `client` binding, so it follows a safe-mode/resume swap.
+let lastCols = cols;
+let lastRows = rows;
+let resizeDebounce: ReturnType<typeof setTimeout> | undefined;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeDebounce);
+  resizeDebounce = setTimeout(() => {
+    if (!debug.ready || debug.sleeping || debug.memoryCapped) return;
+    const next = renderer.gridForSize(innerWidth, innerHeight);
+    if (next.cols === lastCols && next.rows === lastRows) return;
+    lastCols = next.cols;
+    lastRows = next.rows;
+    client.resize(next.cols, next.rows);
+  }, 100);
+});
+
 document.addEventListener("keydown", (ev) => {
   if (isEscapeChord(ev)) {
     ev.preventDefault();

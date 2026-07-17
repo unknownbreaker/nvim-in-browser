@@ -99,6 +99,13 @@ export class NvimClient {
     this.rpc.notify("nvim_input", [keys]);
   }
 
+  // Resize the attached UI grid to `cols`x`rows` cells. Sent as a notification
+  // (like input): nvim responds by emitting `grid_resize` redraw events, which
+  // the renderer applies. Safe to call repeatedly; callers should debounce.
+  resize(cols: number, rows: number): void {
+    this.rpc.notify("nvim_ui_try_resize", [cols, rows]);
+  }
+
   request(method: string, params: unknown[]): Promise<unknown> {
     return this.rpc.request(method, params);
   }

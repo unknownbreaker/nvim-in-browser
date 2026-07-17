@@ -28,8 +28,9 @@
 //  11. Filetype: __nvim.request can set + read `&filetype` in-browser (the apply
 //      mechanism); the host->filetype mapping is unit-tested separately.
 //  12. Field-resize tracking: growing the textarea ELEMENT (fires no window
-//      "resize" event) grows the overlay to match, proving the
-//      ResizeObserver-on-target repositions/resizes the overlay.
+//      "resize" event) grows the overlay to match (ResizeObserver-on-target),
+//      AND the nvim grid canvas inside the frame grows to fill the enlarged
+//      iframe (frame resize -> nvim_ui_try_resize -> grid_resize).
 //  13. T1 bridge phase (fast, NO engine): on framework-editors.html, for each
 //      mock editor (Monaco, CM5, CM6) the MAIN-world bridge resolves the tagged
 //      container and returns the mock's initial text (+ filetype where the
@@ -555,6 +556,12 @@ async function run(exec, headless, id, baseUrl) {
       const f = document.querySelector('iframe[src*="engine-frame.html"]').getBoundingClientRect();
       return { h: f.height, w: f.width };
     });
+    // The nvim grid canvas inside the frame BEFORE the grow — its CSS box should
+    // then grow to fill the enlarged iframe (grid resizes to fit).
+    const preCanvas = await frame.evaluate(() => {
+      const c = document.getElementById("grid").getBoundingClientRect();
+      return { w: c.width, h: c.height };
+    });
     await page.evaluate(() => {
       const ta = document.getElementById("ta");
       ta.style.width = "720px";
@@ -574,6 +581,28 @@ async function run(exec, headless, id, baseUrl) {
     if (Math.abs(postResize.fw - postResize.tw) > 8)
       return { ok: false, reason: `overlay width did not match field: overlay ${postResize.fw} field ${postResize.tw}` };
     console.log("[resize] ASSERT OK: overlay followed the field's own resize (size matched in both dimensions)");
+
+    // The nvim GRID must also grow to fill the enlarged iframe: the frame gets a
+    // window resize -> nvim_ui_try_resize -> grid_resize -> the canvas grows.
+    // Poll (debounce 100ms + engine round-trip + raf).
+    let postCanvas = preCanvas;
+    for (let i = 0; i < 20; i++) {
+      await wait(200);
+      postCanvas = await frame.evaluate(() => {
+        const c = document.getElementById("grid").getBoundingClientRect();
+        return { w: c.width, h: c.height };
+      });
+      if (postCanvas.w > preCanvas.w + 100 && postCanvas.h > preCanvas.h + 100) break;
+    }
+    console.log(`[resize] nvim canvas before ${JSON.stringify(preCanvas)} after ${JSON.stringify(postCanvas)}`);
+    if (!(postCanvas.w > preCanvas.w + 100))
+      return { ok: false, reason: `nvim grid did not widen with the frame: before ${preCanvas.w} after ${postCanvas.w}` };
+    if (!(postCanvas.h > preCanvas.h + 100))
+      return { ok: false, reason: `nvim grid did not grow taller with the frame: before ${preCanvas.h} after ${postCanvas.h}` };
+    // The grid should roughly fill the iframe (cell-size remainder aside).
+    if (postResize.fw - postCanvas.w > 24 || postResize.fh - postCanvas.h > 30)
+      return { ok: false, reason: `nvim grid does not fill the iframe: canvas ${JSON.stringify(postCanvas)} vs frame ${postResize.fw}x${postResize.fh}` };
+    console.log("[resize] ASSERT OK: nvim grid grew to fill the resized iframe");
     await sendEscapeChord(frame);
     await wait(600);
 
