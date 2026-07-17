@@ -27,16 +27,21 @@ const NATIVE_BASENAMES = new Set([
   "cargo.toml",
   "package.json",
   "build.lua",
+  "pyproject.toml",
+  "setup.py",
 ]);
-// Compiled/binary artifacts (shared libs, node addons, wasm). A compiled
-// tree-sitter grammar under parser/ is caught here too (parser/lua.so), which
-// is the "tree-sitter/parser dir with a compiled grammar" case — while plain
-// treesitter queries/*.scm carry no such extension and are NOT a native signal.
-const NATIVE_EXT = /\.(so|dll|dylib|node|wasm)$/i;
+// Compiled/binary artifacts (shared libs, node addons, static libs, wasm). A
+// compiled tree-sitter grammar under parser/ is caught here too (parser/lua.so),
+// which is the "tree-sitter/parser dir with a compiled grammar" case — while
+// plain treesitter queries/*.scm carry no such extension and are NOT native.
+const NATIVE_EXT = /\.(so|dll|dylib|node|a|wasm)$/i;
+// A remote-plugin host directory (python3/node/ruby run in a separate process).
+const NATIVE_DIR = /(?:^|\/)rplugin\//i;
 
-/** True if any tree path signals a native/build/compiled dependency. */
+/** True if any tree path signals a native/build/compiled/remote-host dependency. */
 export function treeHasNativeSignals(paths: string[]): boolean {
   for (const p of paths) {
+    if (NATIVE_DIR.test(p)) return true;
     const base = (p.split("/").pop() ?? p).toLowerCase();
     if (NATIVE_BASENAMES.has(base)) return true;
     if (NATIVE_EXT.test(base)) return true;
@@ -56,16 +61,28 @@ const DISQUALIFIERS: { re: RegExp; name: string }[] = [
   { re: /\bos\.execute\s*\(/, name: "os.execute" },
   { re: /\bio\.popen\s*\(/, name: "io.popen" },
   { re: /\bvim\.system\s*\(/, name: "vim.system" },
-  // host network / libuv
-  { re: /\b(?:vim\.loop|uv|vim\.uv)\.(?:new_tcp|new_udp|spawn)\b/, name: "libuv" },
-  // FFI. `\(?` so Lua's paren-less string-call sugar (`require 'ffi'`) is caught.
+  // host network / libuv sockets + DNS
+  { re: /\b(?:vim\.loop|uv|vim\.uv)\.(?:new_tcp|new_udp|spawn|getaddrinfo|getnameinfo)\b/, name: "libuv" },
+  // channels / RPC sockets (Lua vim.fn.* and Vimscript)
+  { re: /\b(?:vim\.fn\.)?(?:sockconnect|serverstart|ch_open|chansend)\s*\(/, name: "sockets/channels" },
+  // LSP client needs a language-server process + a stdio/socket channel
+  { re: /\bvim\.lsp\.start(?:_client)?\s*\(/, name: "vim.lsp.start" },
+  // FFI / dynamic native library load. `\(?` so Lua's paren-less string-call
+  // sugar (`require 'ffi'`) is caught.
   { re: /require\s*\(?\s*['"]ffi['"]/, name: "ffi" },
-  // needs compiled parsers
-  { re: /\bvim\.treesitter\b/, name: "vim.treesitter" },
+  { re: /\bpackage\.loadlib\s*\(/, name: "package.loadlib" },
+  // C-extension Lua modules that won't load without a native loader
+  { re: /require\s*\(?\s*['"](?:socket(?:\.\w+)?|ssl|cjson|posix|luv|lpeg)['"]/, name: "native-lua-module" },
+  // tree-sitter PARSER INSTALL. The engine ships 7 static grammars, so plain
+  // `vim.treesitter` use is FINE and no longer disqualifies; only installing new
+  // (compiled) grammars does — that path fails in the sandbox.
+  { re: /:TS(?:Install|Update)\b/, name: "treesitter-install" },
 ];
-// Hard runtime deps that won't load in the sandbox. Capture group -> the name.
+// Hard runtime deps that won't load in the sandbox (they spawn processes, hit
+// the network, or need native code). Capture group -> the offending module name.
 // `\(?` matches both require("x") and the paren-less require"x" / require 'x'.
-const HARD_DEP_RE = /require\s*\(?\s*['"](plenary|telescope|nvim-treesitter|mason|lspconfig)/;
+const HARD_DEP_RE =
+  /require\s*\(?\s*['"](plenary|telescope|nvim-treesitter|mason|lspconfig|null-ls|none-ls|nvim-dap|dap|conform|nvim-lint|gitsigns|toggleterm|fzf-lua|neo-tree|nvim-tree)/;
 
 /** The first disqualifying flag found in `text`, or null if it looks clean. */
 export function sourceDisqualifier(text: string): string | null {
@@ -144,6 +161,16 @@ function isSourceCandidate(path: string): boolean {
   if (/\.lua$/.test(path)) return true; // lua/**, plugin/*.lua, a top-level init.lua, …
   if (/^(?:plugin|autoload|after|ftplugin|syntax|indent)\/.+\.vim$/.test(path)) return true;
   return false;
+}
+
+// Scan-order priority (lower = scanned first). The bounded budget can't read
+// every file, so front-load the ENTRY POINTS where process/network calls almost
+// always live — otherwise a jobstart in the 9th file slips through unscanned.
+function sourcePriority(path: string): number {
+  if (/^plugin\/.+\.(lua|vim)$/.test(path)) return 0; // auto-sourced entry points
+  if (/(?:^|\/)init\.lua$/.test(path)) return 1; // lua/<name>/init.lua, top-level init.lua
+  if (/^lua\//.test(path)) return 2; // the rest of the Lua modules
+  return 3; // autoload/after/ftplugin vim, etc.
 }
 
 const MAX_SOURCE_FILES = 8;
@@ -233,10 +260,12 @@ export async function discoverMarketplace(
     const entries = tree.tree ?? [];
     if (treeHasNativeSignals(entries.map((e) => e.path))) return null;
 
-    // Fetch a bounded set of source files from raw (public, no rate-limit cost).
+    // Fetch a bounded set of source files from raw (public, no rate-limit cost),
+    // entry points first so the budget is spent where disqualifiers cluster.
     const sources = entries
       .filter((e) => e.type === "blob" && isSourceCandidate(e.path))
-      .map((e) => e.path);
+      .map((e) => e.path)
+      .sort((a, b) => sourcePriority(a) - sourcePriority(b));
     let text = "";
     let bytes = 0;
     let count = 0;
