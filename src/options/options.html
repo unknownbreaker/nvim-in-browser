@@ -499,6 +499,49 @@
         opacity: 1;
       }
 
+      /* ---- Plugins pane sub-tabs: Installed | Marketplace ---- */
+      .subtabs {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 16px;
+        border-bottom: 1px solid var(--surface-2);
+      }
+      .subtab {
+        background: transparent;
+        border: 1px solid transparent;
+        border-bottom: none;
+        border-radius: 6px 6px 0 0;
+        padding: 8px 16px;
+        color: var(--subtext);
+        font-weight: 500;
+      }
+      .subtab:hover {
+        background: var(--surface);
+      }
+      .subtab.active {
+        background: var(--surface-2);
+        color: var(--text);
+      }
+      .subpanel {
+        display: none;
+      }
+      .subpanel.active {
+        display: block;
+      }
+      .marketplace-updated {
+        font-size: 0.8rem;
+        color: var(--subtext);
+        margin-left: auto;
+      }
+      .shelf-card-stars {
+        font-size: 0.72rem;
+        font-weight: 600;
+        line-height: 1;
+        color: var(--yellow);
+        white-space: nowrap;
+        flex: 0 0 auto;
+      }
+
       @media (max-width: 640px) {
         .shell {
           grid-template-columns: 1fr;
@@ -645,54 +688,106 @@
           <!-- ============================ PLUGINS PANE =========================== -->
           <section class="pane" data-pane="plugins" id="plugins-section">
             <label class="field-label">Plugins (pure-Lua / Vimscript only)</label>
-            <div class="note" style="border-left-color: var(--accent); margin-bottom: 12px">
-              Installs into <code>pack/plugins/start</code> and auto-loads on boot.
-              Plugins that spawn processes or use the network (LSP, Telescope+ripgrep,
-              Treesitter parsers, Mason, plugin managers) will <strong>not</strong> work.
-            </div>
-            <div class="row">
-              <input
-                id="plugin-repo"
-                type="url"
-                placeholder="GitHub owner/repo — e.g. echasnovski/mini.nvim"
-                title="The GitHub repository of a pure-Lua/Vimscript plugin, as owner/repo. It is fetched over the public GitHub API and staged into pack/plugins/start."
-                aria-label="GitHub owner/repo to install"
-                style="flex: 1 1 100%"
-              />
-              <input
-                id="plugin-ref"
-                type="url"
-                placeholder="ref / branch / tag (blank = the repo's default branch)"
-                title="Which branch, tag, or commit to install. Leave blank to use the repo's default branch (main, master, etc. — auto-detected)."
-                aria-label="git ref"
-                style="flex: 0 1 200px"
-              />
-              <button
-                id="plugin-add"
-                class="primary"
-                type="button"
-                title="Fetch the repo above and install it (enabled). Reload your editor tab to load it."
-              >
-                Add from GitHub
+
+            <div class="subtabs" role="tablist" aria-label="Plugins views">
+              <button type="button" class="subtab active" data-subtab="installed" role="tab">
+                Installed
+              </button>
+              <button type="button" class="subtab" data-subtab="marketplace" role="tab">
+                Marketplace
               </button>
             </div>
-            <div class="row">
-              <label
-                class="control"
-                title="Install a plugin from a folder on disk instead of GitHub (a one-time snapshot copy). The top folder name becomes the plugin name."
-              >
-                …or upload a plugin folder:
-                <input id="plugin-folder" type="file" webkitdirectory aria-label="Upload a plugin folder" />
-              </label>
+
+            <!-- ---- Installed sub-panel ---- -->
+            <div class="subpanel active" data-subtab="installed">
+              <div class="note" style="border-left-color: var(--accent); margin-bottom: 12px">
+                Installs into <code>pack/plugins/start</code> and auto-loads on boot.
+                Plugins that spawn processes or use the network (LSP, Telescope+ripgrep,
+                Treesitter parsers, Mason, plugin managers) will <strong>not</strong> work.
+              </div>
+              <div class="row">
+                <input
+                  id="plugin-repo"
+                  type="url"
+                  placeholder="GitHub owner/repo — e.g. echasnovski/mini.nvim"
+                  title="The GitHub repository of a pure-Lua/Vimscript plugin, as owner/repo. It is fetched over the public GitHub API and staged into pack/plugins/start."
+                  aria-label="GitHub owner/repo to install"
+                  style="flex: 1 1 100%"
+                />
+                <input
+                  id="plugin-ref"
+                  type="url"
+                  placeholder="ref / branch / tag (blank = the repo's default branch)"
+                  title="Which branch, tag, or commit to install. Leave blank to use the repo's default branch (main, master, etc. — auto-detected)."
+                  aria-label="git ref"
+                  style="flex: 0 1 200px"
+                />
+                <button
+                  id="plugin-add"
+                  class="primary"
+                  type="button"
+                  title="Fetch the repo above and install it (enabled). Reload your editor tab to load it."
+                >
+                  Add from GitHub
+                </button>
+              </div>
+              <div class="row">
+                <label
+                  class="control"
+                  title="Install a plugin from a folder on disk instead of GitHub (a one-time snapshot copy). The top folder name becomes the plugin name."
+                >
+                  …or upload a plugin folder:
+                  <input id="plugin-folder" type="file" webkitdirectory aria-label="Upload a plugin folder" />
+                </label>
+              </div>
+
+              <h2 class="plugin-subhead">Installed</h2>
+              <ul id="plugin-list" class="plugin-grid"></ul>
+
+              <div class="note" style="margin-top: 16px">
+                Installing only stages the plugin's files into
+                <code>pack/plugins/start</code>. To actually load a plugin, add its
+                setup to your config (e.g. <code>require('plugin').setup{}</code>) and
+                reload your editor.
+              </div>
             </div>
 
-            <h2 class="plugin-subhead">
-              Recommended <span class="plugin-subhead-note">(pure-Lua, sandbox-safe)</span>
-            </h2>
-            <div id="plugin-shelf" class="shelf-grid"></div>
+            <!-- ---- Marketplace sub-panel ---- -->
+            <div class="subpanel" data-subtab="marketplace">
+              <div class="note" style="border-left-color: var(--accent); margin-bottom: 12px">
+                Auto-discovers sandbox-safe <strong>pure-Lua / Vimscript</strong> plugins
+                by searching GitHub itself (top ~50 by stars, vetted with heuristics —
+                best-effort, not exhaustive). Needs a <strong>GitHub token</strong>
+                (save one in <strong>Advanced</strong>) for the API rate limit; without
+                one it shows a small bundled list and can't auto-update.
+              </div>
+              <div class="row">
+                <label
+                  class="control"
+                  title="When on, the marketplace refreshes once a day the next time you open this page (needs a saved GitHub token)."
+                >
+                  <input id="marketplace-autoupdate" type="checkbox" />
+                  Auto-update daily
+                </label>
+                <button
+                  id="marketplace-update"
+                  type="button"
+                  title="Search GitHub now and rebuild the marketplace list (needs a saved GitHub token)."
+                >
+                  Update list
+                </button>
+                <span id="marketplace-updated" class="marketplace-updated"></span>
+              </div>
 
-            <h2 class="plugin-subhead">Installed</h2>
-            <ul id="plugin-list" class="plugin-grid"></ul>
+              <div id="marketplace-list" class="shelf-grid" style="margin-top: 16px"></div>
+
+              <div class="note" style="margin-top: 16px">
+                Installing only stages the plugin's files into
+                <code>pack/plugins/start</code>. To actually load a plugin, add its
+                setup to your config (e.g. <code>require('plugin').setup{}</code>) and
+                reload your editor.
+              </div>
+            </div>
           </section>
 
           <!-- ============================ OVERVIEW PANE ========================== -->

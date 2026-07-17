@@ -6,11 +6,54 @@
 import { openPluginStore, isSafePluginName, type PluginRecord } from "../storage/plugin-store";
 import { fetchGithubPlugin, GithubFetchError } from "../plugins/github-fetch";
 import { openTokenStore } from "../storage/token-store";
+import { openMarketplaceStore } from "../storage/marketplace-store";
+import { discoverMarketplace, MARKETPLACE_MAX_AGE_MS } from "../plugins/marketplace-discovery";
 import { readFolderUpload } from "./folder-upload";
-import { CURATED_PLUGINS, type CuratedPlugin } from "./plugin-catalog";
+import { CURATED_PLUGINS } from "./plugin-catalog";
 
 const store = openPluginStore();
 const tokenStore = openTokenStore();
+const marketplaceStore = openMarketplaceStore();
+
+// The shape the marketplace card renderer needs. Both the discovered
+// MarketplacePlugin (has stars) and the bundled CuratedPlugin seed (no stars)
+// satisfy it, so either can drive a card without a mapping step.
+interface ShelfEntry {
+  repo: string;
+  name: string;
+  blurb: string;
+  category: string;
+  stars?: number;
+}
+
+// localStorage flag for daily-on-open auto-update (mirrors the format-on-save
+// toggle in options-config — a small UI preference, not worth a store schema).
+const MARKETPLACE_AUTOUPDATE_KEY = "nib:marketplaceAutoUpdate";
+function autoUpdateEnabled(): boolean {
+  try {
+    return localStorage.getItem(MARKETPLACE_AUTOUPDATE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function setAutoUpdate(on: boolean): void {
+  try {
+    localStorage.setItem(MARKETPLACE_AUTOUPDATE_KEY, on ? "1" : "0");
+  } catch {
+    // Private-mode / storage-disabled: the toggle just won't persist.
+  }
+}
+
+function relativeTime(ts: number): string {
+  const sec = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (sec < 60) return "just now";
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min} minute${min === 1 ? "" : "s"} ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr} hour${hr === 1 ? "" : "s"} ago`;
+  const day = Math.round(hr / 24);
+  return `${day} day${day === 1 ? "" : "s"} ago`;
+}
 
 function el<T extends Element>(id: string): T {
   const node = document.getElementById(id);
@@ -57,10 +100,13 @@ async function render(): Promise<void> {
   }
   // Keep the plugins count badge + Overview in sync after any (re-)render.
   refreshShell();
-  // Compute the installed-name set ONCE and drive the shelf off it, so the
-  // curated shelf and the installed grid always reflect the same store read.
+  // Compute the installed-name set ONCE and drive the marketplace off it, so the
+  // marketplace cards and the installed grid always reflect the same store read
+  // (an install/remove here flips the matching marketplace card to/from
+  // "Installed ✓"). The marketplace render is async (it reads its own cache DB)
+  // but doesn't block the installed grid below.
   const installedNames = new Set(plugins.map((p) => p.name));
-  renderShelf(installedNames);
+  void renderMarketplace(installedNames);
   list.textContent = "";
   if (plugins.length === 0) {
     const empty = document.createElement("li");
@@ -134,24 +180,36 @@ function renderCard(p: PluginRecord): HTMLLIElement {
   return li;
 }
 
-// --- Curated shelf: recommended pure-Lua plugins with one-click install ------
+// --- Marketplace: self-discovered (or bundled-seed) pure-Lua plugins ---------
 // Rebuilt on every render() off the installed-name set, so a card flips to
 // "Installed ✓" the moment its plugin lands in the store (and back if removed).
-function renderShelf(installedNames: Set<string>): void {
-  const shelf = el<HTMLDivElement>("plugin-shelf");
-  shelf.textContent = "";
-  for (const entry of CURATED_PLUGINS) {
-    shelf.append(renderShelfCard(entry, installedNames.has(entry.name)));
+// Cards come from the marketplace cache DB; with no cache we fall back to the
+// bundled CURATED_PLUGINS seed and label the timestamp accordingly.
+async function renderMarketplace(installedNames: Set<string>): Promise<void> {
+  const listEl = el<HTMLDivElement>("marketplace-list");
+  const cache = await marketplaceStore.load();
+  // Show discovered plugins only when a run actually produced some; otherwise
+  // (no cache, or a run that found nothing / was rate-limited) fall back to the
+  // bundled seed — and label it as the seed, not as a fresh "Updated" run.
+  const usingCache = Boolean(cache && cache.plugins.length > 0);
+  const entries: ShelfEntry[] = usingCache ? cache!.plugins : CURATED_PLUGINS;
+  listEl.textContent = "";
+  for (const entry of entries) {
+    listEl.append(renderMarketplaceCard(entry, installedNames.has(entry.name)));
   }
+  el<HTMLSpanElement>("marketplace-updated").textContent = usingCache
+    ? `Updated ${relativeTime(cache!.updatedAt)}`
+    : "Showing bundled list — run Update to discover plugins";
 }
 
-function renderShelfCard(entry: CuratedPlugin, installed: boolean): HTMLDivElement {
+function renderMarketplaceCard(entry: ShelfEntry, installed: boolean): HTMLDivElement {
   const card = document.createElement("div");
   card.className = "shelf-card";
 
   const header = document.createElement("div");
   header.className = "shelf-card-header";
-  // Static catalog strings, but built with textContent for consistency.
+  // entry.name/blurb/repo can be repo-derived (marketplace) or static (seed);
+  // build with textContent either way so a repo string can never inject markup.
   const nameEl = document.createElement("strong");
   nameEl.className = "shelf-card-name";
   nameEl.textContent = entry.name;
@@ -167,6 +225,12 @@ function renderShelfCard(entry: CuratedPlugin, installed: boolean): HTMLDivEleme
   const repoEl = document.createElement("div");
   repoEl.className = "shelf-card-repo";
   repoEl.textContent = entry.repo;
+  if (typeof entry.stars === "number" && entry.stars > 0) {
+    const stars = document.createElement("span");
+    stars.className = "shelf-card-stars";
+    stars.textContent = ` ★ ${entry.stars.toLocaleString()}`;
+    repoEl.append(stars);
+  }
 
   const install = document.createElement("button");
   install.type = "button";
@@ -184,13 +248,13 @@ function renderShelfCard(entry: CuratedPlugin, installed: boolean): HTMLDivEleme
   return card;
 }
 
-async function onShelfInstall(entry: CuratedPlugin, btn: HTMLButtonElement): Promise<void> {
+async function onShelfInstall(entry: ShelfEntry, btn: HTMLButtonElement): Promise<void> {
   const original = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Installing…";
   // Blank ref -> installFromGithub lets fetchGithubPlugin resolve the repo's
   // default branch (master vs main vs …). On success it re-renders, which
-  // rebuilds this shelf and detaches this button (flipped to "Installed ✓").
+  // rebuilds the marketplace and detaches this button (flipped to "Installed ✓").
   await installFromGithub(entry.repo, "");
   // Only reached with the button still attached if the install did NOT succeed
   // (no re-render happened); restore it so the user can retry.
@@ -369,6 +433,85 @@ async function onClearToken(): Promise<void> {
   }
 }
 
+// --- Marketplace update: discover from GitHub + refresh the cached list ------
+// Always available, but a token is required (GitHub's search + tree APIs are
+// rate-limited hard without one). Guards every network/store call so a failure
+// lands in the status line and re-enables the button, never a blank page.
+let marketplaceUpdating = false;
+async function onMarketplaceUpdate(): Promise<void> {
+  if (marketplaceUpdating) return; // don't stack a manual click on an auto-update
+  let token: string | null;
+  try {
+    token = await tokenStore.get();
+  } catch {
+    token = null;
+  }
+  if (!token) {
+    status("Save a GitHub token in Advanced to update the marketplace.", "info");
+    return;
+  }
+  const btn = el<HTMLButtonElement>("marketplace-update");
+  const original = btn.textContent;
+  marketplaceUpdating = true;
+  btn.disabled = true;
+  btn.textContent = "Updating…";
+  status("Updating marketplace…", "info");
+  try {
+    const result = await discoverMarketplace({
+      token,
+      onProgress: (vetted, scanned) => {
+        btn.textContent = `Updating… (${vetted})`;
+        status(`Updating marketplace… vetted ${vetted} (scanned ${scanned}).`, "info");
+      },
+    });
+    await marketplaceStore.save(result.plugins, Date.now());
+    await render(); // recomputes installedNames + re-renders both sub-panels
+    if (result.rateLimited) {
+      status(
+        `GitHub's rate limit was hit — showing a partial list of ${result.plugins.length}. Try Update again later.`,
+        "info",
+      );
+    } else {
+      status(`Marketplace updated — ${result.plugins.length} sandbox-safe plugins.`, "ok");
+    }
+  } catch (err) {
+    status(`Marketplace update failed: ${err instanceof Error ? err.message : String(err)}`, "err");
+  } finally {
+    marketplaceUpdating = false;
+    btn.disabled = false;
+    btn.textContent = original ?? "Update list";
+  }
+}
+
+// Daily-on-open refresh: only when the toggle is on, a token exists, and the
+// cache is missing or older than 24h. Non-blocking — kicked off from init.
+async function maybeAutoUpdateMarketplace(): Promise<void> {
+  if (!autoUpdateEnabled()) return;
+  let token: string | null;
+  try {
+    token = await tokenStore.get();
+  } catch {
+    token = null;
+  }
+  if (!token) return; // toggle stays usable; updates simply need a token
+  const cache = await marketplaceStore.load();
+  const stale = !cache || Date.now() - cache.updatedAt > MARKETPLACE_MAX_AGE_MS;
+  if (!stale) return;
+  void onMarketplaceUpdate();
+}
+
+function initSubtabs(): void {
+  const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>("#plugins-section .subtab"));
+  const panels = Array.from(document.querySelectorAll<HTMLElement>("#plugins-section .subpanel"));
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => {
+      const target = tab.dataset.subtab;
+      for (const t of tabs) t.classList.toggle("active", t === tab);
+      for (const p of panels) p.classList.toggle("active", p.dataset.subtab === target);
+    });
+  }
+}
+
 export function initPluginsUI(): void {
   el<HTMLButtonElement>("plugin-add").addEventListener("click", () => void onAddGithub());
   el<HTMLInputElement>("plugin-folder").addEventListener("change", (e) =>
@@ -376,6 +519,25 @@ export function initPluginsUI(): void {
   );
   el<HTMLButtonElement>("gh-token-save").addEventListener("click", () => void onSaveToken());
   el<HTMLButtonElement>("gh-token-clear").addEventListener("click", () => void onClearToken());
+
+  initSubtabs();
+  el<HTMLButtonElement>("marketplace-update").addEventListener("click", () => void onMarketplaceUpdate());
+  const autoBox = el<HTMLInputElement>("marketplace-autoupdate");
+  autoBox.checked = autoUpdateEnabled();
+  autoBox.addEventListener("change", () => {
+    setAutoUpdate(autoBox.checked);
+    if (!autoBox.checked) return;
+    // Turned on: nudge an update now if a token exists, else say why it won't.
+    void tokenStore
+      .get()
+      .then((t) => {
+        if (t) void maybeAutoUpdateMarketplace();
+        else status("Auto-update is on, but updates need a GitHub token (save one in Advanced).", "info");
+      })
+      .catch(() => undefined);
+  });
+
   void refreshTokenStatus();
   void render();
+  void maybeAutoUpdateMarketplace();
 }

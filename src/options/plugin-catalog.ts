@@ -1,8 +1,12 @@
-// Curated shelf of vetted pure-Lua plugins that work inside the WASM sandbox
-// (no processes, no network at runtime). Each entry is installed via the normal
-// GitHub path with a blank ref, so the repo's default branch (main vs master)
-// is auto-detected. `name` is the derived plugin name = the repo segment after
-// the slash, matching how options-plugins derives it on install.
+// Bundled SEED / fallback for the plugin Marketplace: vetted pure-Lua plugins
+// that work inside the WASM sandbox (no processes, no network at runtime). The
+// Marketplace normally shows GitHub-discovered results (marketplace-discovery.ts
+// + marketplace-store.ts); this list is what renderMarketplace() falls back to
+// when there is no cached discovery yet (e.g. no GitHub token). Each entry is
+// installed via the normal GitHub path with a blank ref, so the repo's default
+// branch (main vs master) is auto-detected. `name` is the derived plugin name =
+// the repo segment after the slash, matching how options-plugins derives it on
+// install.
 export interface CuratedPlugin {
   repo: string;
   name: string;
