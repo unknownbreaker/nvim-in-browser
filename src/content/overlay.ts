@@ -213,6 +213,16 @@ function activate(): void {
   window.addEventListener("scroll", reposition, true);
   window.addEventListener("resize", reposition);
 
+  // Track the target FIELD's own size, not just the viewport. Dragging a
+  // textarea's resize grip, a responsive relayout, or a JS-driven size change
+  // fires no window "resize" event, so a ResizeObserver on the target is what
+  // keeps the overlay matching the field's box across all of those. (The scroll
+  // + window-resize listeners above still handle the field MOVING when the page
+  // reflows or scrolls.) positionFrame recomputes width/height too, so the
+  // overlay follows both size and position from one callback.
+  const sizeObserver = new ResizeObserver(reposition);
+  sizeObserver.observe(target);
+
   // Escape-chord escape hatch: while the overlay is active the chord is
   // normally consumed inside the (focused) iframe, which posts back
   // "nvim-deactivate". But if focus ever escapes the frame back to this
@@ -235,6 +245,7 @@ function activate(): void {
     window.removeEventListener("scroll", reposition, true);
     window.removeEventListener("resize", reposition);
     window.removeEventListener("keydown", guardEscape, true);
+    sizeObserver.disconnect();
     frame.removeEventListener("load", onLoad);
     const t = active?.target;
     active?.frame.remove();
