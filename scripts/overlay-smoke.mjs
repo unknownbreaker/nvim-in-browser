@@ -40,6 +40,9 @@
 //      activating seeds the engine buffer with the CM5 mock's initial text (the
 //      bridge read reached the engine); a mid-session edit writes back through
 //      the bridge to the mock's setValue; the escape chord removes the overlay.
+//  15. Toggle: the activation chord (Ctrl+Shift+E) closes the overlay too. Both
+//      the in-frame keydown path and the re-fired activation command path pull +
+//      sync the final buffer text, remove the overlay, and (frame path) refocus.
 //
 // Browser + extension-load handling mirrors scripts/browser-smoke.mjs.
 //
@@ -247,6 +250,16 @@ async function sendEscapeChord(frame) {
         shiftKey: true,
         bubbles: true,
       }),
+    );
+  });
+}
+
+// Dispatch the activation/toggle chord (Ctrl+Shift+E) inside the engine frame —
+// the toggle path used when embedded nvim (this frame) has focus.
+async function sendToggleChord(frame) {
+  await frame.evaluate(() => {
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "E", ctrlKey: true, shiftKey: true, bubbles: true }),
     );
   });
 }
@@ -676,6 +689,55 @@ async function run(exec, headless, id, baseUrl) {
       return { ok: false, reason: "T1 overlay iframe not removed on deactivate" };
     console.log("[t1-integration] ASSERT OK: escape chord removed the overlay");
 
+    // ---- Case 11: the activation chord is a TOGGLE (close returns to the field) ----
+    // Two close paths: (A) the chord pressed while embedded nvim (the frame) has
+    // focus -> the frame's keydown deactivates; (B) the activation command
+    // re-fired while active -> the content script asks the frame to close. Both
+    // must pull + sync the final buffer text and remove the overlay.
+    console.log("[toggle] navigating to textarea.html for toggle tests...");
+    await page.goto(`${baseUrl}/textarea.html`, { waitUntil: "load" });
+    await wait(400);
+    page.__fieldId = "ta";
+
+    console.log("[toggle:frame] activating then pressing Ctrl+Shift+E inside the frame...");
+    frame = await activateOn(page, "ta");
+    await frame.evaluate(() => window.__nvim.input("ciwtoggled"));
+    await frame.evaluate(() => window.__nvim.input("<Esc>"));
+    await sendToggleChord(frame);
+    await wait(700);
+    const afterFrameToggle = await page.evaluate(() => ({
+      gone: !document.querySelector('iframe[src*="engine-frame.html"]'),
+      value: document.getElementById("ta").value,
+      focusedId: document.activeElement?.id ?? null,
+    }));
+    console.log(`[toggle:frame] -> ${JSON.stringify(afterFrameToggle)}`);
+    if (!afterFrameToggle.gone)
+      return { ok: false, reason: "toggle chord in frame did not close the overlay" };
+    if (!afterFrameToggle.value.startsWith("toggled"))
+      return { ok: false, reason: `frame toggle-close lost the final sync: ${JSON.stringify(afterFrameToggle.value)}` };
+    if (afterFrameToggle.focusedId !== "ta")
+      return { ok: false, reason: `frame toggle-close did not refocus the field: ${afterFrameToggle.focusedId}` };
+    console.log("[toggle:frame] ASSERT OK: chord in frame closed + synced + refocused the field");
+
+    console.log("[toggle:content] activating then re-firing the activation command...");
+    frame = await activateOn(page, "ta");
+    await frame.evaluate(() => window.__nvim.input("ciwsecond"));
+    await frame.evaluate(() => window.__nvim.input("<Esc>"));
+    // Re-fire the same activation the Chrome command triggers; activate() is now a
+    // toggle, so this asks the frame to close instead of opening a second overlay.
+    await page.evaluate(() => window.postMessage({ type: "nvim-activate-test" }, "*"));
+    await wait(700);
+    const afterContentToggle = await page.evaluate(() => ({
+      gone: !document.querySelector('iframe[src*="engine-frame.html"]'),
+      value: document.getElementById("ta").value,
+    }));
+    console.log(`[toggle:content] -> ${JSON.stringify(afterContentToggle)}`);
+    if (!afterContentToggle.gone)
+      return { ok: false, reason: "re-firing the activation command did not close the overlay" };
+    if (!afterContentToggle.value.startsWith("second"))
+      return { ok: false, reason: `content-script toggle-close lost the final sync: ${JSON.stringify(afterContentToggle.value)}` };
+    console.log("[toggle:content] ASSERT OK: re-activation closed + synced");
+
     await browser.close();
     return { ok: true };
   } catch (e) {
@@ -732,7 +794,8 @@ async function main() {
     console.log(
       "\nPASS: overlay activation, debounced sync, deactivate, input + password cases, " +
         "IME composition, hostile-page notice, filetype-apply mechanism, field-resize tracking, " +
-        "T1 bridge phase (Monaco + CM5 + CM6 read/write), and T1 engine integration (CM5)",
+        "T1 bridge phase (Monaco + CM5 + CM6 read/write), T1 engine integration (CM5), " +
+        "and activation-chord toggle (frame keydown + re-fired command)",
     );
   } finally {
     console.log("restoring production dist/chromium (test hooks disabled)...");

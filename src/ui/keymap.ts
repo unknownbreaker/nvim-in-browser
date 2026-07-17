@@ -14,8 +14,15 @@ export function isEscapeChord(ev: KeyLike): boolean {
   return ev.key === "Escape" && ev.ctrlKey && ev.shiftKey;
 }
 
+// The activation chord (Ctrl+Shift+E, matching the manifest `activate-nvim`
+// command). It toggles: pressing it inside the embedded editor closes it. With
+// Shift held the E key reports as "E"; accept "e" too defensively.
+export function isToggleChord(ev: KeyLike): boolean {
+  return (ev.key === "E" || ev.key === "e") && ev.ctrlKey && ev.shiftKey && !ev.altKey && !ev.metaKey;
+}
+
 export function keyEventToNvim(ev: KeyLike): string | null {
-  if (isEscapeChord(ev)) return null;
+  if (isEscapeChord(ev) || isToggleChord(ev)) return null;
   if (MODIFIER_KEYS.has(ev.key)) return null;
   const special = SPECIAL[ev.key];
   const isPrintable = !special && ev.key.length === 1;

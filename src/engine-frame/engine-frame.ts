@@ -13,7 +13,7 @@ import { openConfigStore } from "../storage/config-store";
 import { openPluginStore } from "../storage/plugin-store";
 import { pluginsToConfigFiles } from "../plugins/pack-layout";
 import { GridRenderer } from "../ui/grid-renderer";
-import { isEscapeChord, keyEventToNvim } from "../ui/keymap";
+import { isEscapeChord, isToggleChord, keyEventToNvim } from "../ui/keymap";
 
 const params = new URLSearchParams(location.search);
 const mode = params.get("mode") ?? "full";
@@ -148,7 +148,11 @@ window.addEventListener("resize", () => {
 });
 
 document.addEventListener("keydown", (ev) => {
-  if (isEscapeChord(ev)) {
+  // Both the escape chord AND the activation chord close the editor (the latter
+  // makes the activation shortcut a toggle: press it inside nvim to return to
+  // the field). isToggleChord is checked here because, once embedded nvim is
+  // focused, the keystroke reaches this frame — not the host content script.
+  if (isEscapeChord(ev) || isToggleChord(ev)) {
     ev.preventDefault();
     void deactivate();
     return;
@@ -189,7 +193,12 @@ async function currentText(): Promise<string> {
   return lines.map(decodeLine).join("\n");
 }
 
+// Guard so the buffer is pulled + posted once, even if two close paths race
+// (e.g. the frame keydown and a `nvim-request-close` from the parent).
+let deactivating = false;
 async function deactivate(): Promise<void> {
+  if (deactivating) return;
+  deactivating = true;
   // Race the buffer pull against a timeout: if the engine is dead or hung after
   // boot, fall back to the last known text instead of wedging the escape chord
   // forever. The parent still has the last synced value as a floor.
@@ -545,6 +554,10 @@ if (mode === "embed") {
   window.addEventListener("message", (ev) => {
     const m = ev.data;
     if (m?.type === "nvim-init") void init(m.text, m.filetype);
+    // The content script asks us to close (the toggle chord fired while the host
+    // page — not this frame — had focus). Run the same buffer-pull + sync path
+    // the chord uses, so edits since the last debounce aren't lost.
+    else if (m?.type === "nvim-request-close") void deactivate();
   });
 } else {
   void startScratch();

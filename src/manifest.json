@@ -26,7 +26,7 @@
   "commands": {
     "activate-nvim": {
       "suggested_key": { "default": "Ctrl+Shift+E", "mac": "MacCtrl+Shift+E" },
-      "description": "Activate Neovim on the focused text field"
+      "description": "Toggle Neovim on the focused text field (press again to close)"
     }
   },
   "content_scripts": [
