@@ -90,8 +90,7 @@ const debug = {
 // Build a fresh engine client. Factored out so the safe-mode fallback can
 // replace a wedged config client with an identically-constructed clean one.
 // Reads the language pack INSIDE, so a reboot re-reads the current setting and
-// picks the matching wasm + runtime; the cache key is variant-suffixed so
-// base/web compiled modules cache independently.
+// picks the matching wasm + runtime.
 function makeClient(): NvimClient {
   const pack = languagePack();
   debug.languagePack = pack;
@@ -101,9 +100,11 @@ function makeClient(): NvimClient {
     chrome.runtime.getURL("engine-worker.js"),
     chrome.runtime.getURL(wasm),
     chrome.runtime.getURL(runtime),
-    // Keys the worker's compiled-module cache so later boots skip the ~11 MB
-    // recompile. The version bumps on every release (new engine); the pack
-    // suffix keeps the base/web modules cached apart.
+    // Keys the worker's compiled-module cache so later boots skip the recompile.
+    // The pack suffix means a base boot is never served the web module (or vice
+    // versa) — a version/key mismatch is a cache miss that recompiles the right
+    // one. (The cache holds a single module, so toggling packs recompiles once;
+    // staying on one pack caches as before.)
     `${chrome.runtime.getManifest().version}-${pack}`,
   );
 }
