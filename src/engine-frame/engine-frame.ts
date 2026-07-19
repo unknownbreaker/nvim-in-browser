@@ -485,6 +485,24 @@ async function installBufferHooks(): Promise<number> {
     ].join("\n"),
     [],
   ]);
+  // Auto-enable treesitter highlighting for the grammars STATICALLY LINKED into
+  // the engine (c, lua, vim, vimdoc→help, markdown+markdown_inline, query). nvim
+  // doesn't start treesitter on its own, so without this the bundled grammars go
+  // unused. vim.treesitter.start() attaches the highlighter to a buffer; pcall
+  // makes a filetype with no bundled grammar a silent no-op. Registered after the
+  // user's config has booted, and fires on FileType (which the embed init triggers
+  // via `setlocal filetype=…`) plus once for the already-loaded buffer.
+  await client.request("nvim_exec_lua", [
+    [
+      "local BUNDLED = { c = true, lua = true, vim = true, help = true, markdown = true, query = true }",
+      "vim.api.nvim_create_autocmd('FileType', {",
+      "  group = vim.api.nvim_create_augroup('nib_treesitter', { clear = true }),",
+      "  callback = function(ev) if BUNDLED[ev.match] then pcall(vim.treesitter.start, ev.buf) end end,",
+      "})",
+      "pcall(function() if BUNDLED[vim.bo.filetype] then vim.treesitter.start() end end)",
+    ].join("\n"),
+    [],
+  ]);
   return channel;
 }
 
