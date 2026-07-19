@@ -597,6 +597,9 @@
           <button type="button" class="rail-item" data-pane="plugins" title="Install and manage pure-Lua plugins.">
             Plugins<span class="rail-badge count" id="badge-plugins"></span>
           </button>
+          <button type="button" class="rail-item" data-pane="languages" title="Pick the treesitter language pack (engine variant).">
+            Languages<span class="rail-badge" id="badge-languages"></span>
+          </button>
           <button type="button" class="rail-item" data-pane="overview" title="At-a-glance status of your config, plugins, and token.">
             Overview<span class="rail-badge" id="badge-overview"></span>
           </button>
@@ -813,6 +816,46 @@
                 setup to your config (e.g. <code>require('plugin').setup{}</code>) and
                 reload your editor.
               </div>
+            </div>
+          </section>
+
+          <!-- ============================ LANGUAGES PANE ========================= -->
+          <section class="pane" data-pane="languages" id="languages-section">
+            <label class="field-label">Language pack (treesitter highlighting)</label>
+            <div class="note" style="border-left-color: var(--accent); margin-bottom: 12px">
+              A language pack swaps the <strong>whole Neovim engine</strong> for a
+              variant that statically links more treesitter grammars, so composite
+              web languages highlight via native injection. Only one is active at a
+              time — <strong>reload your editor tab</strong> to apply a change. The
+              Web pack is a bigger download.
+            </div>
+
+            <div
+              class="checkbox-row"
+              title="The default engine. Smaller download; highlights Lua, Vim, Markdown, and C."
+            >
+              <input type="radio" name="lang-pack" id="lang-pack-base" />
+              <label for="lang-pack-base">
+                Base
+                <span class="pill pill-on" id="lang-pack-base-active" hidden>Active</span>
+                <span class="hint">Lua, Vim, Markdown, C — the default. Smaller download.</span>
+              </label>
+            </div>
+
+            <div
+              class="checkbox-row"
+              style="margin-top: 10px"
+              title="A superset engine that adds the web treesitter grammars. ~2.7 MB larger download."
+            >
+              <input type="radio" name="lang-pack" id="lang-pack-web" />
+              <label for="lang-pack-web">
+                Web
+                <span class="pill pill-on" id="lang-pack-web-active" hidden>Active</span>
+                <span class="hint"
+                  >+ HTML, CSS, JS, TS, TSX, JSON, YAML, Svelte, Astro (composite
+                  web files highlight via injection). ~2.7 MB larger download.</span
+                >
+              </label>
             </div>
           </section>
 

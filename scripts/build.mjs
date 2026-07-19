@@ -100,7 +100,16 @@ for (const size of [16, 32, 48, 128]) {
 // The build stamps dist/chromium/engine-info.json with the source ("nvim-wasi"),
 // the pinned release tag, and each file's bytes + sha256 so downstream tooling
 // (release.sh) can confirm which engine landed.
-const engineAssets = ["nvim-asyncify.wasm", "nvim-runtime.tar.gz"];
+// Both engine VARIANTS ship: base (nvim-asyncify.wasm + nvim-runtime.tar.gz)
+// and the web treesitter superset (…-web.*). The overlay iframe fetches
+// whichever variant the user's language-pack setting selects at boot; both are
+// part of the same nvim-wasi release tag, so they're stamped together.
+const engineAssets = [
+  "nvim-asyncify.wasm",
+  "nvim-runtime.tar.gz",
+  "nvim-asyncify-web.wasm",
+  "nvim-runtime-web.tar.gz",
+];
 const engineDir = path.join(root, "vendor", "nvim-wasi");
 const lock = JSON.parse(await readFile(path.join(root, "engine.lock.json"), "utf8"));
 
