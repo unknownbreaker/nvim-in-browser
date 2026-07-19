@@ -2,6 +2,7 @@
 // UI modules. All feature logic lives in options-config.ts / options-plugins.ts.
 import { initConfigUI } from "./options-config";
 import { initEditorHighlight } from "./options-highlight";
+import { initLanguagesUI } from "./options-languages";
 import { initPluginsUI } from "./options-plugins";
 import { initNav } from "./options-nav";
 import { initStatusUI } from "./options-status";
@@ -35,4 +36,5 @@ initNav();
 initConfigUI();
 initEditorHighlight();
 initPluginsUI();
+initLanguagesUI();
 initStatusUI();

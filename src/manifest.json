@@ -52,7 +52,9 @@
         "engine-frame.js",
         "engine-worker.js",
         "nvim-asyncify.wasm",
-        "nvim-runtime.tar.gz"
+        "nvim-runtime.tar.gz",
+        "nvim-asyncify-web.wasm",
+        "nvim-runtime-web.tar.gz"
       ],
       "matches": ["<all_urls>"]
     }

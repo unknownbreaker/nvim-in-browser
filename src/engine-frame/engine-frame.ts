@@ -24,21 +24,40 @@ const canvas = document.getElementById("grid") as HTMLCanvasElement;
 // `document`, so the normal keymap path is unaffected for non-composition keys.
 const ime = document.getElementById("ime") as HTMLInputElement;
 const renderer = new GridRenderer(canvas);
-// Build a fresh engine client. Factored out so the safe-mode fallback can
-// replace a wedged config client with an identically-constructed clean one.
-function makeClient(): NvimClient {
-  return new NvimClient(
-    chrome.runtime.getURL("engine-worker.js"),
-    chrome.runtime.getURL("nvim-asyncify.wasm"),
-    chrome.runtime.getURL("nvim-runtime.tar.gz"),
-    // Keys the worker's compiled-module cache so later boots skip the ~11 MB
-    // recompile. The version bumps on every release (new engine), invalidating it.
-    chrome.runtime.getManifest().version,
-  );
+// Language pack = the engine VARIANT to boot. "base" (default, smaller) or
+// "web" (a superset that statically links the web treesitter grammars +
+// queries). Chosen at boot from a localStorage setting written by the options
+// Languages pane; changing it needs a reload since the variant is picked when
+// makeClient constructs the client. The reader is guarded so a storage failure
+// falls back to base.
+type LanguagePack = "base" | "web";
+const LANGUAGE_PACK_KEY = "nib:languagePack";
+function languagePack(): LanguagePack {
+  try {
+    return localStorage.getItem(LANGUAGE_PACK_KEY) === "web" ? "web" : "base";
+  } catch {
+    return "base";
+  }
 }
-// Reassignable: bootWithSafeMode swaps in a fresh client on config-boot failure.
-// All code references the current binding, so the swap is transparent.
-let client = makeClient();
+
+// Filetypes whose treesitter grammar is statically linked into each engine
+// variant (see installBufferHooks). Base is always present; the web pack adds
+// the web set. Keyed off the known set only to avoid futile vim.treesitter.start
+// attempts — a missing grammar would pcall-no-op anyway.
+const TS_BASE_FILETYPES = ["c", "lua", "vim", "help", "markdown", "query"];
+const TS_WEB_FILETYPES = [
+  "html",
+  "css",
+  "javascript",
+  "javascriptreact",
+  "typescript",
+  "typescriptreact",
+  "json",
+  "jsonc",
+  "yaml",
+  "svelte",
+  "astro",
+];
 
 // Small, generic automation/debugging hook. Exposed on window so a headless
 // browser (or DevTools) can observe readiness, read the buffer, drive input,
@@ -57,6 +76,9 @@ const debug = {
   // True while an idle-torn-down scratch instance is sleeping (worker disposed,
   // waiting for a keydown/click to respawn). Read by the idle-teardown smoke.
   sleeping: false,
+  // Active language pack ("base" | "web"), set by makeClient at each (re)boot so
+  // a smoke can confirm which engine variant is live.
+  languagePack: "base" as LanguagePack,
   getBufferText: (): Promise<string> => currentText(),
   input: (keys: string): void => client.input(keys),
   // Generic RPC passthrough so a headless smoke can query/mutate nvim state
@@ -64,6 +86,31 @@ const debug = {
   request: (method: string, params: unknown[]): Promise<unknown> => client.request(method, params),
 };
 (window as unknown as { __nvim: typeof debug }).__nvim = debug;
+
+// Build a fresh engine client. Factored out so the safe-mode fallback can
+// replace a wedged config client with an identically-constructed clean one.
+// Reads the language pack INSIDE, so a reboot re-reads the current setting and
+// picks the matching wasm + runtime.
+function makeClient(): NvimClient {
+  const pack = languagePack();
+  debug.languagePack = pack;
+  const wasm = pack === "web" ? "nvim-asyncify-web.wasm" : "nvim-asyncify.wasm";
+  const runtime = pack === "web" ? "nvim-runtime-web.tar.gz" : "nvim-runtime.tar.gz";
+  return new NvimClient(
+    chrome.runtime.getURL("engine-worker.js"),
+    chrome.runtime.getURL(wasm),
+    chrome.runtime.getURL(runtime),
+    // Keys the worker's compiled-module cache so later boots skip the recompile.
+    // The pack suffix means a base boot is never served the web module (or vice
+    // versa) — a version/key mismatch is a cache miss that recompiles the right
+    // one. (The cache holds a single module, so toggling packs recompiles once;
+    // staying on one pack caches as before.)
+    `${chrome.runtime.getManifest().version}-${pack}`,
+  );
+}
+// Reassignable: bootWithSafeMode swaps in a fresh client on config-boot failure.
+// All code references the current binding, so the swap is transparent.
+let client = makeClient();
 
 // Resource-lifecycle budgets (scratch/full mode). A runaway config/plugin that
 // blows past MEM_CAP_BYTES is stopped (no respawn — avoid a crash loop); an
@@ -486,15 +533,36 @@ async function installBufferHooks(): Promise<number> {
     [],
   ]);
   // Auto-enable treesitter highlighting for the grammars STATICALLY LINKED into
-  // the engine (c, lua, vim, vimdoc→help, markdown+markdown_inline, query). nvim
-  // doesn't start treesitter on its own, so without this the bundled grammars go
-  // unused. vim.treesitter.start() attaches the highlighter to a buffer; pcall
-  // makes a filetype with no bundled grammar a silent no-op. Registered after the
-  // user's config has booted, and fires on FileType (which the embed init triggers
-  // via `setlocal filetype=…`) plus once for the already-loaded buffer.
+  // the active engine variant. nvim doesn't start treesitter on its own, so
+  // without this the bundled grammars go unused. vim.treesitter.start() attaches
+  // the highlighter to a buffer; pcall makes a filetype with no bundled grammar a
+  // silent no-op. The bundled filetype set is VARIANT-AWARE: base ships c, lua,
+  // vim, vimdoc→help, markdown+markdown_inline, query; the web pack additionally
+  // links the web grammars, so its set adds html/css/js/ts/tsx/json/yaml/svelte/
+  // astro (composite web languages then highlight via native treesitter
+  // injection). Registered after the user's config has booted, and fires on
+  // FileType (which the embed init triggers via `setlocal filetype=…`) plus once
+  // for the already-loaded buffer.
+  //
+  // On web, also register the two filetype→lang aliases nvim can't auto-register
+  // under `--noplugin`: javascriptreact→javascript (JSX lives in the js grammar)
+  // and typescriptreact→tsx. Guarded with pcall and web-only. Registered BEFORE
+  // the autocmd so vim.treesitter.start resolves the right grammar for those fts.
+  const pack = languagePack();
+  const filetypes =
+    pack === "web" ? [...TS_BASE_FILETYPES, ...TS_WEB_FILETYPES] : TS_BASE_FILETYPES;
+  const bundledTable = filetypes.map((ft) => `['${ft}'] = true`).join(", ");
+  const aliasLines =
+    pack === "web"
+      ? [
+          "pcall(vim.treesitter.language.register, 'javascript', 'javascriptreact')",
+          "pcall(vim.treesitter.language.register, 'tsx', 'typescriptreact')",
+        ]
+      : [];
   await client.request("nvim_exec_lua", [
     [
-      "local BUNDLED = { c = true, lua = true, vim = true, help = true, markdown = true, query = true }",
+      ...aliasLines,
+      `local BUNDLED = { ${bundledTable} }`,
       "vim.api.nvim_create_autocmd('FileType', {",
       "  group = vim.api.nvim_create_augroup('nib_treesitter', { clear = true }),",
       "  callback = function(ev) if BUNDLED[ev.match] then pcall(vim.treesitter.start, ev.buf) end end,",
