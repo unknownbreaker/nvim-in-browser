@@ -94,6 +94,20 @@ rm -f "$ZIP_LATEST" "$ZIP_VERSIONED"
 cp "$ZIP_VERSIONED" "$ZIP_LATEST"
 log "packaged $ZIP_LATEST and $ZIP_VERSIONED"
 
+# The build also emits dist/firefox (same compiled extension, Firefox-transformed
+# manifest). Package it into its own zips mirroring the Chromium naming.
+[[ -f dist/firefox/manifest.json ]] || { restore_bump; die "build did not produce dist/firefox/manifest.json"; }
+FIREFOX_ZIP_LATEST="dist/nvim-in-browser-firefox.zip"
+FIREFOX_ZIP_VERSIONED="dist/nvim-in-browser-firefox-$VERSION.zip"
+rm -f "$FIREFOX_ZIP_LATEST" "$FIREFOX_ZIP_VERSIONED"
+(cd dist/firefox && zip -qr "../../$FIREFOX_ZIP_VERSIONED" .)
+cp "$FIREFOX_ZIP_VERSIONED" "$FIREFOX_ZIP_LATEST"
+log "packaged $FIREFOX_ZIP_LATEST and $FIREFOX_ZIP_VERSIONED"
+# TODO(AMO): the Firefox zip must be submitted to addons.mozilla.org for signing
+# before it can be distributed/installed by end users. This script does NOT sign
+# or publish to AMO — that is a separate manual step (web-ext sign / AMO upload).
+log "NOTE: submit $FIREFOX_ZIP_LATEST to addons.mozilla.org (AMO) for signing — not done here."
+
 if [[ "$DRY_RUN" == true ]]; then
   restore_bump
   log "dry run complete; version bump reverted, no git/GitHub changes made"
@@ -127,9 +141,9 @@ git tag "$TAG"
 git push origin "$TAG"
 
 gh release create "$TAG" \
-  "$ZIP_LATEST" "$ZIP_VERSIONED" \
+  "$ZIP_LATEST" "$ZIP_VERSIONED" "$FIREFOX_ZIP_LATEST" "$FIREFOX_ZIP_VERSIONED" \
   --title "$TAG" \
   --generate-notes \
-  --notes "Install: download a zip, unzip it, then load the folder via chrome://extensions -> Load unpacked. Both zips contain the same compiled extension."
+  --notes "Chromium: download a chromium zip, unzip it, then load the folder via chrome://extensions -> Load unpacked. Firefox: the firefox zip must be signed via addons.mozilla.org (AMO) before distribution; for local testing, load dist/firefox via about:debugging -> This Firefox -> Load Temporary Add-on. All zips contain the same compiled extension (only the manifest differs)."
 
 log "published release $TAG"

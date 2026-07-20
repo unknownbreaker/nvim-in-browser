@@ -7,6 +7,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "fetch-assets": "node scripts/fetch-engine.mjs",
+    "lint:firefox": "web-ext lint --source-dir dist/firefox --self-hosted --output text",
+    "smoke:firefox": "node scripts/firefox-smoke.mjs",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.worker.json",
     "prepare": "git config core.hooksPath scripts/git-hooks 2>/dev/null || true"

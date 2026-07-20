@@ -134,13 +134,43 @@ MDM-managed).
 ```sh
 npm ci
 npm run fetch-assets # -> vendor/nvim-wasi (pinned engine; needs gh auth)
-npm run build        # -> dist/chromium (load via chrome://extensions -> Load unpacked)
+npm run build        # -> dist/chromium AND dist/firefox
 npm run typecheck
 ```
 
 Each build copies the fetched engine into `dist/chromium/` and stamps
 `dist/chromium/engine-info.json` recording the source (`nvim-wasi`), the pinned
 release tag, and each file's byte size + SHA-256.
+
+### Browsers
+
+`npm run build` emits **two** output dirs from one compile:
+
+- `dist/chromium/` — Chrome/Chromium MV3. Load via `chrome://extensions` →
+  Developer mode → **Load unpacked** → `dist/chromium/`.
+- `dist/firefox/` — Firefox MV3. Load via `about:debugging` → This Firefox →
+  **Load Temporary Add-on** → pick `dist/firefox/manifest.json`.
+
+Both dirs ship the identical compiled extension (same `content.js`,
+`editor-bridge.js`, `background.js`, engine-frame, options page, wasm + runtime,
+and `engine-info.json`) — only `manifest.json` differs. The Firefox manifest is
+a transform of the Chrome one: MV3 background `service_worker` →
+`scripts` + `type:"module"`, `options_page` → `options_ui`, plus a
+`browser_specific_settings.gecko` block (extension id, `strict_min_version`, and
+`data_collection_permissions`). `chrome.*` is aliased to `browser.*` in Firefox
+for every API this code uses, so the runtime code is shared verbatim.
+
+Firefox tooling (needs [`web-ext`](https://github.com/mozilla/web-ext) on PATH):
+
+```sh
+npm run lint:firefox   # web-ext lint dist/firefox — must be 0 errors
+npm run smoke:firefox  # installs dist/firefox in headless Firefox (install gate)
+```
+
+Distribution to Firefox is via **AMO** (addons.mozilla.org) signing — the
+`dist/firefox` zip that `scripts/release.sh` packages must be submitted to AMO
+for signing before end users can install it (the release script does not sign or
+publish to AMO — that is a separate manual step).
 
 **Git hooks.** `npm ci`/`npm install` runs a `prepare` step that points
 `core.hooksPath` at `scripts/git-hooks/`, enabling a **`post-merge`** hook that
@@ -160,9 +190,12 @@ from a terminal (or run `npm run build` yourself).
 scripts/release.sh patch   # or minor | major | X.Y.Z; add --dry-run to test
 ```
 
-Builds, packages `nvim-in-browser-chromium.zip` + `nvim-in-browser-chromium-X.Y.Z.zip`,
-opens and merges a release PR, tags `vX.Y.Z`, and publishes a GitHub release
-with both zips attached.
+Builds, packages `nvim-in-browser-chromium.zip` + `nvim-in-browser-chromium-X.Y.Z.zip`
+**and** `nvim-in-browser-firefox.zip` + `nvim-in-browser-firefox-X.Y.Z.zip`, opens
+and merges a release PR, tags `vX.Y.Z`, and publishes a GitHub release with all
+zips attached. The Firefox zip still needs AMO signing before end users can
+install it (a separate manual step — the script logs a reminder and does not
+sign/publish to AMO).
 
 ## Engine
 
