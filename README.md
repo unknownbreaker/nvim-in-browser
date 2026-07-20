@@ -175,10 +175,19 @@ into the privileged `moz-extension://` frame, so it observes the engine's
 debounced buffer→field sync from the page instead.) It builds a test-hooks dist
 to drive activation, then restores the production build.
 
-Distribution to Firefox is via **AMO** (addons.mozilla.org) signing — the
-`dist/firefox` zip that `scripts/release.sh` packages must be submitted to AMO
-for signing before end users can install it (the release script does not sign or
-publish to AMO — that is a separate manual step).
+**Installing on Firefox (unsigned, developer use).** `scripts/release.sh`
+packages `dist/firefox` as an **`.xpi`** (an `.xpi` is just a zip with
+`manifest.json` at the root). Firefox has no persistent "load unpacked folder"
+like Chrome — the `about:debugging` folder load (above) is always temporary
+(gone on restart). For a **permanent** install without AMO, use **Firefox
+Developer Edition / Nightly / ESR / Unbranded**:
+
+1. `about:config` → set `xpinstall.signatures.required` to `false`
+2. `about:addons` → gear ⚙ → **Install Add-on From File** → pick the `.xpi`
+
+This persists across restarts. Stock **release/beta** Firefox ignores that pref,
+so there the `.xpi` must be **AMO-signed** (addons.mozilla.org) first — the
+release script does not sign to AMO (a separate manual step).
 
 **Git hooks.** `npm ci`/`npm install` runs a `prepare` step that points
 `core.hooksPath` at `scripts/git-hooks/`, enabling a **`post-merge`** hook that
@@ -199,11 +208,12 @@ scripts/release.sh patch   # or minor | major | X.Y.Z; add --dry-run to test
 ```
 
 Builds, packages `nvim-in-browser-chromium.zip` + `nvim-in-browser-chromium-X.Y.Z.zip`
-**and** `nvim-in-browser-firefox.zip` + `nvim-in-browser-firefox-X.Y.Z.zip`, opens
+**and** `nvim-in-browser-firefox.xpi` + `nvim-in-browser-firefox-X.Y.Z.xpi`, opens
 and merges a release PR, tags `vX.Y.Z`, and publishes a GitHub release with all
-zips attached. The Firefox zip still needs AMO signing before end users can
-install it (a separate manual step — the script logs a reminder and does not
-sign/publish to AMO).
+artifacts attached. The Firefox `.xpi` is unsigned — installable on Firefox
+Developer Edition / Nightly / ESR (see "Installing on Firefox" above), or
+AMO-signed for stock release Firefox (a separate manual step — the script logs a
+reminder and does not sign/publish to AMO).
 
 ## Engine
 
