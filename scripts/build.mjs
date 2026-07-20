@@ -6,6 +6,7 @@ import path from "node:path";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const outDir = path.join(root, "dist", "chromium");
+const firefoxDir = path.join(root, "dist", "firefox");
 
 const pkg = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 
@@ -141,4 +142,42 @@ const manifest = JSON.parse(await readFile(path.join(root, "src", "manifest.json
 manifest.version = pkg.version;
 await writeFile(path.join(outDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 
-console.log(`built dist/chromium (version ${manifest.version})`);
+// --- Firefox (MV3) build variant -----------------------------------------
+// The Firefox build ships the IDENTICAL compiled extension (same content.js,
+// editor-bridge.js, background.js, engine-frame, options, wasm, runtime, and
+// engine-info.json) as dist/chromium — only the manifest differs. Copy the
+// whole chromium output into dist/firefox, then overwrite manifest.json with a
+// Firefox-transformed variant. (Gecko aliases chrome.* to browser.* for every
+// API this code uses, so no runtime code changes are needed.)
+await rm(firefoxDir, { recursive: true, force: true });
+await cp(outDir, firefoxDir, { recursive: true });
+
+// Manifest transform (Chrome MV3 -> Firefox MV3), verified to lint clean and
+// install in Firefox 128+:
+//   - background.service_worker  -> background.scripts + type:"module"
+//     (Firefox implements MV3 background as an event page, not a worker)
+//   - options_page               -> options_ui { page, open_in_tab }
+//   - add browser_specific_settings.gecko: extension id + strict_min_version,
+//     plus data_collection_permissions (a new AMO requirement — we collect no
+//     data, so { required: ["none"] } clears the lint warning)
+// Everything else (permissions, icons, action, commands, content_scripts incl.
+// world:"MAIN", CSP with wasm-unsafe-eval, web_accessible_resources) is
+// identical and Firefox-compatible.
+const firefoxManifest = JSON.parse(JSON.stringify(manifest));
+delete firefoxManifest.background;
+delete firefoxManifest.options_page;
+firefoxManifest.background = { scripts: ["background.js"], type: "module" };
+firefoxManifest.options_ui = { page: "options.html", open_in_tab: true };
+firefoxManifest.browser_specific_settings = {
+  gecko: {
+    id: "nvim-in-browser@unknownbreaker",
+    strict_min_version: "128.0",
+    data_collection_permissions: { required: ["none"] },
+  },
+};
+await writeFile(
+  path.join(firefoxDir, "manifest.json"),
+  JSON.stringify(firefoxManifest, null, 2) + "\n",
+);
+
+console.log(`built dist/chromium and dist/firefox (version ${manifest.version})`);
