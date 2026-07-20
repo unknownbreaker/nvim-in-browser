@@ -163,9 +163,17 @@ for every API this code uses, so the runtime code is shared verbatim.
 Firefox tooling (needs [`web-ext`](https://github.com/mozilla/web-ext) on PATH):
 
 ```sh
-npm run lint:firefox   # web-ext lint dist/firefox — must be 0 errors
-npm run smoke:firefox  # installs dist/firefox in headless Firefox (install gate)
+npm run lint:firefox              # web-ext lint dist/firefox — must be 0 errors
+npm run smoke:firefox             # installs dist/firefox in headless Firefox (install gate)
+npm run smoke:firefox:behavioral  # boots the wasm engine in Firefox + edits a buffer (runtime gate)
 ```
+
+`smoke:firefox:behavioral` goes past install: it activates the overlay on a real
+page in headless Firefox, mounts the engine-frame, and asserts the wasm Neovim
+engine boots and a typed edit syncs back to the field. (WebDriver BiDi can't read
+into the privileged `moz-extension://` frame, so it observes the engine's
+debounced buffer→field sync from the page instead.) It builds a test-hooks dist
+to drive activation, then restores the production build.
 
 Distribution to Firefox is via **AMO** (addons.mozilla.org) signing — the
 `dist/firefox` zip that `scripts/release.sh` packages must be submitted to AMO
