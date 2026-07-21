@@ -16,6 +16,7 @@
 // Do NOT import it into any worker or content-script bundle.
 import { NvimClient } from "../engine/client";
 import { pluginFilesToOpt } from "./pack-layout";
+import { HARD_DEP_MODULES, NATIVE_LUA_MODULES } from "./marketplace-discovery";
 
 export interface VerifyResult {
   ok: boolean;
@@ -30,6 +31,19 @@ export interface VerifyResult {
 const CLEAN_ARGV = ["nvim", "--embed", "-u", "NORC", "--noplugin", "-i", "NONE", "-n"];
 
 const DEFAULT_TIMEOUT_MS = 20_000;
+
+// Lua identifiers can't contain '-', so hyphenated names (nvim-dap, null-ls, …)
+// need bracket-string keys; everything else can be a bare key.
+function luaRiskyKey(name: string): string {
+  return /^[A-Za-z_]\w*$/.test(name) ? name : `['${name}']`;
+}
+
+// The `risky` require-name table below, built from the SAME canonical arrays
+// marketplace-discovery.ts uses for its static HARD_DEP_RE / native-module
+// regexes, so this runtime shim can't drift from the static detector.
+const RISKY_LUA_ENTRIES = [...NATIVE_LUA_MODULES, ...HARD_DEP_MODULES]
+  .map((m) => `${luaRiskyKey(m)} = true`)
+  .join(", ");
 
 // The recording prelude, injected (once) BEFORE the candidate loads. Each patch
 // is guarded (pcall / existence check) so a field missing on an older build
@@ -102,13 +116,7 @@ end)
 -- module still throws its own catchable error — which is fine). socket.* etc.
 -- match on the leading dotted component.
 pcall(function()
-  local risky = {
-    ffi = true, socket = true, ssl = true, cjson = true, posix = true,
-    plenary = true, telescope = true, ['nvim-treesitter'] = true, mason = true,
-    lspconfig = true, ['nvim-dap'] = true, ['null-ls'] = true, ['none-ls'] = true,
-    gitsigns = true, conform = true, ['nvim-lint'] = true, toggleterm = true,
-    ['fzf-lua'] = true, ['neo-tree'] = true, ['nvim-tree'] = true,
-  }
+  local risky = { ${RISKY_LUA_ENTRIES} }
   local _oldrequire = _G.require
   _G.require = function(m)
     if type(m) == 'string' then

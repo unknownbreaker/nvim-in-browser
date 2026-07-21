@@ -51,6 +51,49 @@ export function treeHasNativeSignals(paths: string[]): boolean {
   return false;
 }
 
+// --- Canonical sandbox-incompatible name lists -------------------------------
+// Single source of truth for "risky" plugin/module names, shared by this
+// file's static regex detector AND compat-verify.ts's runtime Lua shim (which
+// imports these arrays to build its `risky` table). Each list is the UNION of
+// what both detectors independently listed before this refactor, so neither
+// detector was weakened by the merge. Exported so compat-verify.ts derives its
+// table from the same source instead of hand-listing it separately.
+
+// Plugin names with hard runtime deps that won't load in the sandbox (they
+// spawn processes, hit the network, or need native code).
+export const HARD_DEP_MODULES: readonly string[] = [
+  "plenary",
+  "telescope",
+  "nvim-treesitter",
+  "mason",
+  "lspconfig",
+  "null-ls",
+  "none-ls",
+  "nvim-dap",
+  "dap",
+  "conform",
+  "nvim-lint",
+  "gitsigns",
+  "toggleterm",
+  "fzf-lua",
+  "neo-tree",
+  "nvim-tree",
+];
+
+// Native/C-extension Lua modules that won't load without a native loader.
+export const NATIVE_LUA_MODULES: readonly string[] = ["ffi", "socket", "ssl", "cjson", "posix"];
+
+// `ffi` gets its own disqualifier entry (see DISQUALIFIERS below) distinct
+// from the rest of NATIVE_LUA_MODULES, so it's split out here too. `socket`
+// keeps its `(?:\.\w+)?` suffix so submodules (socket.core, socket.http, …)
+// still match — the one piece of per-module regex shape that isn't a plain
+// alternation, so it can't be folded into the array itself.
+const FFI_MODULE = "ffi";
+const ffiAlternation = NATIVE_LUA_MODULES.filter((m) => m === FFI_MODULE).join("|");
+const otherNativeAlternation = NATIVE_LUA_MODULES.filter((m) => m !== FFI_MODULE)
+  .map((m) => (m === "socket" ? "socket(?:\\.\\w+)?" : m))
+  .join("|");
+
 // Source-text patterns that make a plugin incompatible with the no-process,
 // no-network WASI sandbox. Order defines "first match wins"; the hard-dep check
 // (which captures the offending module name) runs last.
@@ -72,14 +115,14 @@ const DISQUALIFIERS: { re: RegExp; name: string }[] = [
   { re: /\bvim\.lsp\.(?:start(?:_client)?|enable)\s*\(/, name: "vim.lsp.start" },
   // FFI / dynamic native library load. `\(?` so Lua's paren-less string-call
   // sugar (`require 'ffi'`) is caught.
-  { re: /require\s*\(?\s*['"]ffi['"]/, name: "ffi" },
+  { re: new RegExp(`require\\s*\\(?\\s*['"]${ffiAlternation}['"]`), name: "ffi" },
   { re: /\bpackage\.loadlib\s*\(/, name: "package.loadlib" },
   // C-extension Lua modules that won't load without a native loader. NB: lpeg
   // and luv are statically linked into core Neovim (require('lpeg')/require('luv')
   // resolve to built-ins — lpeg backs vim.lpeg/vim.re; luv is the vim.loop table),
   // so they are NOT listed here; luv's incompatible socket/spawn methods are
   // already caught by the libuv disqualifier above.
-  { re: /require\s*\(?\s*['"](?:socket(?:\.\w+)?|ssl|cjson|posix)['"]/, name: "native-lua-module" },
+  { re: new RegExp(`require\\s*\\(?\\s*['"](?:${otherNativeAlternation})['"]`), name: "native-lua-module" },
   // tree-sitter PARSER INSTALL. The engine ships 7 static grammars, so plain
   // `vim.treesitter` use is FINE and no longer disqualifies; only installing new
   // (compiled) grammars does — that path fails in the sandbox.
@@ -88,8 +131,7 @@ const DISQUALIFIERS: { re: RegExp; name: string }[] = [
 // Hard runtime deps that won't load in the sandbox (they spawn processes, hit
 // the network, or need native code). Capture group -> the offending module name.
 // `\(?` matches both require("x") and the paren-less require"x" / require 'x'.
-const HARD_DEP_RE =
-  /require\s*\(?\s*['"](plenary|telescope|nvim-treesitter|mason|lspconfig|null-ls|none-ls|nvim-dap|dap|conform|nvim-lint|gitsigns|toggleterm|fzf-lua|neo-tree|nvim-tree)/;
+const HARD_DEP_RE = new RegExp(`require\\s*\\(?\\s*['"](${HARD_DEP_MODULES.join("|")})`);
 
 /** The first disqualifying flag found in `text`, or null if it looks clean. */
 export function sourceDisqualifier(text: string): string | null {
