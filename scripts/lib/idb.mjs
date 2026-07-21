@@ -85,6 +85,13 @@ export function idbTx(page, storeName, op, args) {
               }
               store.put({ enabled: args.enabled }, "meta");
               break;
+            default:
+              // Unreachable via the six exported wrappers; guards against a
+              // future call site passing an unknown op (which would otherwise
+              // resolve an empty transaction and silently write nothing).
+              db.close();
+              reject(new Error("unknown idb op: " + op));
+              return;
           }
           tx.oncomplete = () => {
             db.close();
