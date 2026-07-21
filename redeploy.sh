@@ -27,12 +27,15 @@ if [[ ! -d node_modules ]] || ! git diff --quiet "$before" "$after" -- package-l
   npm ci --no-audit --no-fund || npm install --no-audit --no-fund
 fi
 
-# Re-fetch the pinned nvim-wasi engine only when the pin changed (idempotent:
-# fetch-engine.mjs skips files whose sha256 already matches engine.lock.json).
-if ! git diff --quiet "$before" "$after" -- engine.lock.json; then
-  echo "[redeploy] engine pin changed — fetching engine assets"
-  npm run fetch-assets
-fi
+# Always ensure the pinned nvim-wasi engine assets are present before building.
+# fetch-engine.mjs is idempotent and cheap when they're current (it skips any
+# file whose sha256 already matches engine.lock.json — no download), and running
+# it unconditionally self-heals a clone that never fetched them or is missing a
+# newer variant (e.g. the -web language-pack wasm added in a later release). A
+# lock-change-only guard would skip the fetch and the build would then fail on
+# the missing asset.
+echo "[redeploy] ensuring engine assets (idempotent)"
+npm run fetch-assets
 
 echo "[redeploy] building..."
 npm run build
