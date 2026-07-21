@@ -7,6 +7,8 @@
 // requests don't count against the API rate limit). fetchImpl is injectable so
 // the whole pipeline is unit-testable with canned responses.
 
+import { apiHeaders, isRateLimitStatus, treeUrl, rawUrl } from "./github-api";
+
 export interface MarketplacePlugin {
   repo: string;
   name: string;
@@ -147,8 +149,8 @@ interface SearchRepo {
 
 // A 403 that GitHub attributes to rate limiting (header first, body as fallback).
 async function isRateLimitResponse(res: Response): Promise<boolean> {
+  if (isRateLimitStatus(res)) return true;
   if (res.status !== 403) return false;
-  if (res.headers.get("X-RateLimit-Remaining") === "0") return true;
   try {
     return /rate limit/i.test(await res.clone().text());
   } catch {
@@ -196,10 +198,7 @@ export async function discoverMarketplace(
 ): Promise<{ plugins: MarketplacePlugin[]; rateLimited: boolean; scanned: number }> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const budget = opts.budget ?? 50;
-  const authHeaders: Record<string, string> = {
-    Accept: "application/vnd.github+json",
-    Authorization: `token ${opts.token}`,
-  };
+  const authHeaders = apiHeaders(opts.token);
 
   let rateLimited = false;
   let scanned = 0;
@@ -247,10 +246,10 @@ export async function discoverMarketplace(
     const branch = repo.default_branch || "main";
     let treeRes: Response;
     try {
-      treeRes = await fetchImpl(
-        `${API}/repos/${owner}/${name}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-        { headers: authHeaders, signal: opts.signal },
-      );
+      treeRes = await fetchImpl(treeUrl(owner, name, branch), {
+        headers: authHeaders,
+        signal: opts.signal,
+      });
     } catch {
       return null;
     }
@@ -278,7 +277,7 @@ export async function discoverMarketplace(
       if (count >= MAX_SOURCE_FILES || bytes >= MAX_SOURCE_BYTES) break;
       let raw: Response;
       try {
-        raw = await fetchImpl(`https://raw.githubusercontent.com/${owner}/${name}/${branch}/${p}`, {
+        raw = await fetchImpl(rawUrl(owner, name, branch, p), {
           signal: opts.signal,
         });
       } catch {
