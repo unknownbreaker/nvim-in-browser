@@ -23,11 +23,11 @@
 //
 // Run: node scripts/firefox-behavioral-smoke.mjs
 import puppeteer from "puppeteer-core";
-import { execFileSync } from "node:child_process";
-import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { buildDist } from "./lib/build-dist.mjs";
+import { startFixtureServer } from "./lib/fixture-server.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DIST = path.join(root, "dist", "firefox");
@@ -43,10 +43,7 @@ const log = (m) => console.log(`[ff-behavioral] ${m}`);
 const CT = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
 
 function build(testHooks) {
-  const env = { ...process.env };
-  if (testHooks) env.NVIM_TEST_HOOKS = "1";
-  else delete env.NVIM_TEST_HOOKS;
-  execFileSync("node", ["scripts/build.mjs"], { cwd: root, env, stdio: "inherit" });
+  buildDist({ testHooks, root });
 }
 
 async function run() {
@@ -57,20 +54,11 @@ async function run() {
       throw new Error("dist/firefox lacks the nvim-activate-test hook (test build failed?)");
     }
 
-    const baseUrl = await new Promise((resolve) => {
-      server = createServer(async (req, res) => {
-        const rel = req.url === "/" ? "/textarea.html" : req.url;
-        try {
-          const body = await readFile(path.join(pagesDir, rel.replace(/^\/+/, "")));
-          res.writeHead(200, { "content-type": CT[path.extname(rel)] || "text/plain" });
-          res.end(body);
-        } catch {
-          res.writeHead(404);
-          res.end("not found");
-        }
-      });
-      server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${server.address().port}`));
+    const started = await startFixtureServer(pagesDir, {
+      contentType: (file) => CT[path.extname(file)] || "text/plain",
     });
+    server = started.server;
+    const baseUrl = started.baseUrl;
     log(`fixture server at ${baseUrl}`);
 
     log("launching headless Firefox via BiDi...");
