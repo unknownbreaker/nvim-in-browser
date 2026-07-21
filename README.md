@@ -189,17 +189,18 @@ This persists across restarts. Stock **release/beta** Firefox ignores that pref,
 so there the `.xpi` must be **AMO-signed** (addons.mozilla.org) first — the
 release script does not sign to AMO (a separate manual step).
 
-**Git hooks.** `npm ci`/`npm install` runs a `prepare` step that points
-`core.hooksPath` at `scripts/git-hooks/`, enabling a **`post-merge`** hook that
-refreshes your build after a `git pull`: it reinstalls deps if `package.json`
-changed, re-fetches the pinned `nvim-wasi` engine if `engine.lock.json` changed,
-and then **always runs `npm run build`** so the loaded extension is current
-(reload it at `chrome://extensions`). Enable it manually with `git config
-core.hooksPath scripts/git-hooks`. Caveats: it fires only on a merge-style pull
-(a rebase pull skips `post-merge`), and because git runs hooks without your
-login shell, an **nvm-managed `npm` must be on `PATH`** — a normal terminal is
-fine, but a GUI/IDE git client may not source your profile, in which case pull
-from a terminal (or run `npm run build` yourself).
+**Updating your local build — `./redeploy.sh`.** Instead of a bare `git pull`,
+run `./redeploy.sh` to refresh the loaded extension: it fast-forward-pulls,
+reinstalls deps only if the lockfile changed, re-fetches the pinned `nvim-wasi`
+engine only if `engine.lock.json` changed, then runs `npm run build`. Reload the
+extension afterward (`chrome://extensions` ↻, or `about:debugging` for Firefox).
+
+This replaces an earlier `post-merge` git hook. A hook ran without your login
+shell, so an nvm-managed `npm` was often off `PATH` and the rebuild silently
+skipped; a script you invoke from your own terminal always has the right `npm`,
+and it fails loudly (`set -e`) if the build breaks instead of leaving a stale
+build. (If you cloned before this change, `git config --unset core.hooksPath`
+clears the now-defunct hook path.)
 
 ## Release
 

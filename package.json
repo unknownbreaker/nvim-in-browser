@@ -11,8 +11,7 @@
     "smoke:firefox": "node scripts/firefox-smoke.mjs",
     "smoke:firefox:behavioral": "node scripts/firefox-behavioral-smoke.mjs",
     "test": "vitest run --passWithNoTests",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.worker.json",
-    "prepare": "git config core.hooksPath scripts/git-hooks 2>/dev/null || true"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.worker.json"
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",
