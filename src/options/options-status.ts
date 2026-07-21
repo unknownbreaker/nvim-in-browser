@@ -7,6 +7,7 @@
 import { openConfigStore } from "../storage/config-store";
 import { openPluginStore } from "../storage/plugin-store";
 import { openTokenStore } from "../storage/token-store";
+import { EVT_REFRESH } from "./options-dom";
 
 const configStore = openConfigStore();
 const pluginStore = openPluginStore();
@@ -91,6 +92,6 @@ export async function refreshStatus(): Promise<void> {
 }
 
 export function initStatusUI(): void {
-  document.addEventListener("nib-refresh", () => void refreshStatus());
+  document.addEventListener(EVT_REFRESH, () => void refreshStatus());
   void refreshStatus();
 }

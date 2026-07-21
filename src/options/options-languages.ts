@@ -6,34 +6,12 @@
 // matching the other lightweight toggles (nib:formatOnSave, etc.) rather than
 // the config-store meta schema. engine-frame reads it at boot, so a change
 // needs an editor-tab reload — surfaced via the shared nib-status line.
+import { el, emitStatus as status, makeStringPref } from "./options-dom";
+
 type LanguagePack = "base" | "web";
-const LANGUAGE_PACK_KEY = "nib:languagePack";
-
-function languagePack(): LanguagePack {
-  try {
-    return localStorage.getItem(LANGUAGE_PACK_KEY) === "web" ? "web" : "base";
-  } catch {
-    return "base";
-  }
-}
-
-function setLanguagePack(pack: LanguagePack): void {
-  try {
-    localStorage.setItem(LANGUAGE_PACK_KEY, pack);
-  } catch {
-    // Private-mode / storage-disabled: the selection just won't persist.
-  }
-}
-
-function el<T extends Element>(id: string): T {
-  const node = document.getElementById(id);
-  if (!node) throw new Error(`missing element #${id}`);
-  return node as unknown as T;
-}
-
-function status(message: string, kind: "ok" | "err" | "info"): void {
-  document.dispatchEvent(new CustomEvent("nib-status", { detail: { message, kind } }));
-}
+const languagePackPref = makeStringPref<LanguagePack>("nib:languagePack", "base", ["base", "web"]);
+const languagePack = (): LanguagePack => languagePackPref.get();
+const setLanguagePack = (pack: LanguagePack): void => languagePackPref.set(pack);
 
 // Reflect the active pack: check the matching radio and reveal its "Active"
 // pill (hide the other's).

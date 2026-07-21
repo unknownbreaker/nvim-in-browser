@@ -4,9 +4,10 @@
 // transparent-text textarea, pixel-aligned via identical box metrics. The
 // textarea keeps a visible caret; the coloring shows through it.
 //
-// SYNC: repaint on textarea "input" (typing) and on the custom "nib-editor-set"
+// SYNC: repaint on textarea "input" (typing) and on the custom EVT_EDITOR_SET
 // event (options-config sets editor.value programmatically in select/onFetch/
 // onClear WITHOUT firing "input"); mirror scroll offsets on "scroll".
+import { EVT_EDITOR_SET } from "./options-dom";
 
 // Lua + a small Vimscript keyword subset. Correctness over completeness: the
 // only hard rule is that highlight() never corrupts the displayed text.
@@ -156,7 +157,7 @@ export function initEditorHighlight(): void {
     pre.scrollLeft = textarea.scrollLeft;
   });
   // Repaint after a programmatic value set (select/onFetch/onClear).
-  document.addEventListener("nib-editor-set", paint);
+  document.addEventListener(EVT_EDITOR_SET, paint);
 
   paint(); // initial paint (in case this runs after the first select's event)
 }

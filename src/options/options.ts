@@ -6,6 +6,7 @@ import { initLanguagesUI } from "./options-languages";
 import { initPluginsUI } from "./options-plugins";
 import { initNav } from "./options-nav";
 import { initStatusUI } from "./options-status";
+import { EVT_STATUS } from "./options-dom";
 
 const statusEl = document.getElementById("status") as HTMLDivElement | null;
 let statusTimer: ReturnType<typeof setTimeout> | undefined;
@@ -27,7 +28,7 @@ function setStatus(message: string, kind: "ok" | "err" | "info", autoClear: bool
   }
 }
 
-document.addEventListener("nib-status", (e) => {
+document.addEventListener(EVT_STATUS, (e) => {
   const d = (e as CustomEvent<{ message: string; kind: "ok" | "err" | "info" }>).detail;
   setStatus(d.message, d.kind, d.kind !== "err");
 });

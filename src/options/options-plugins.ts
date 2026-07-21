@@ -11,6 +11,7 @@ import { openMarketplaceStore } from "../storage/marketplace-store";
 import { discoverMarketplace, MARKETPLACE_MAX_AGE_MS } from "../plugins/marketplace-discovery";
 import { readFolderUpload } from "./folder-upload";
 import { CURATED_PLUGINS } from "./plugin-catalog";
+import { el, emitStatus as status, refreshShell, describe, makeBoolPref } from "./options-dom";
 
 const store = openPluginStore();
 const tokenStore = openTokenStore();
@@ -29,21 +30,9 @@ interface ShelfEntry {
 
 // localStorage flag for daily-on-open auto-update (mirrors the format-on-save
 // toggle in options-config — a small UI preference, not worth a store schema).
-const MARKETPLACE_AUTOUPDATE_KEY = "nib:marketplaceAutoUpdate";
-function autoUpdateEnabled(): boolean {
-  try {
-    return localStorage.getItem(MARKETPLACE_AUTOUPDATE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-function setAutoUpdate(on: boolean): void {
-  try {
-    localStorage.setItem(MARKETPLACE_AUTOUPDATE_KEY, on ? "1" : "0");
-  } catch {
-    // Private-mode / storage-disabled: the toggle just won't persist.
-  }
-}
+const marketplaceAutoUpdatePref = makeBoolPref("nib:marketplaceAutoUpdate", false);
+const autoUpdateEnabled = (): boolean => marketplaceAutoUpdatePref.get();
+const setAutoUpdate = (on: boolean): void => marketplaceAutoUpdatePref.set(on);
 
 function relativeTime(ts: number): string {
   const sec = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -54,22 +43,6 @@ function relativeTime(ts: number): string {
   if (hr < 24) return `${hr} hour${hr === 1 ? "" : "s"} ago`;
   const day = Math.round(hr / 24);
   return `${day} day${day === 1 ? "" : "s"} ago`;
-}
-
-function el<T extends Element>(id: string): T {
-  const node = document.getElementById(id);
-  if (!node) throw new Error(`missing element #${id}`);
-  return node as unknown as T;
-}
-
-// Reuse the page's status line (owned by options.ts) via a tiny event so this
-// module doesn't duplicate the status widget.
-function status(message: string, kind: "ok" | "err" | "info"): void {
-  document.dispatchEvent(new CustomEvent("nib-status", { detail: { message, kind } }));
-}
-// Nudge the nav badges + Overview pane to re-read after a store write.
-function refreshShell(): void {
-  document.dispatchEvent(new CustomEvent("nib-refresh"));
 }
 
 function fetchErrorMessage(err: unknown): string {
@@ -87,7 +60,7 @@ function fetchErrorMessage(err: unknown): string {
         return `Network error: ${err.message} (some hosts block cross-origin fetch; GitHub works).`;
     }
   }
-  return err instanceof Error ? err.message : String(err);
+  return describe(err);
 }
 
 async function render(): Promise<void> {
@@ -96,7 +69,7 @@ async function render(): Promise<void> {
   try {
     plugins = await store.list();
   } catch (err) {
-    status(`Failed to list plugins: ${err instanceof Error ? err.message : String(err)}`, "err");
+    status(`Failed to list plugins: ${describe(err)}`, "err");
     return;
   }
   // Keep the plugins count badge + Overview in sync after any (re-)render.
@@ -234,7 +207,7 @@ async function onVerify(
     result.hidden = false;
     result.className = "plugin-card-verify verify-bad";
     result.textContent = "Verify failed to run.";
-    status(`Verify failed for ${p.name}: ${err instanceof Error ? err.message : String(err)}`, "err");
+    status(`Verify failed for ${p.name}: ${describe(err)}`, "err");
   } finally {
     btn.disabled = false;
     btn.textContent = original;
@@ -339,7 +312,7 @@ async function onToggle(name: string, box: HTMLInputElement, pill?: HTMLElement)
     status(enabled ? `${name} enabled (reload your editor).` : `${name} disabled (reload your editor).`, "info");
   } catch (err) {
     box.checked = !enabled;
-    status(`Failed to update ${name}: ${err instanceof Error ? err.message : String(err)}`, "err");
+    status(`Failed to update ${name}: ${describe(err)}`, "err");
   }
 }
 
@@ -350,7 +323,7 @@ async function onRemove(name: string): Promise<void> {
     status(`Removed ${name}. (reload your editor)`, "ok");
     await render();
   } catch (err) {
-    status(`Failed to remove ${name}: ${err instanceof Error ? err.message : String(err)}`, "err");
+    status(`Failed to remove ${name}: ${describe(err)}`, "err");
   }
 }
 
@@ -446,7 +419,7 @@ async function onUploadFolder(input: HTMLInputElement): Promise<void> {
     status(`Uploaded ${top} (${pluginFiles.length} files). (reload your editor)`, "ok");
     await render();
   } catch (err) {
-    status(`Upload failed: ${err instanceof Error ? err.message : String(err)}`, "err");
+    status(`Upload failed: ${describe(err)}`, "err");
   } finally {
     input.value = "";
   }
@@ -478,7 +451,7 @@ async function onSaveToken(): Promise<void> {
     refreshShell();
     await refreshTokenStatus();
   } catch (err) {
-    status(`Failed to save token: ${err instanceof Error ? err.message : String(err)}`, "err");
+    status(`Failed to save token: ${describe(err)}`, "err");
   }
 }
 
@@ -490,7 +463,7 @@ async function onClearToken(): Promise<void> {
     refreshShell();
     await refreshTokenStatus();
   } catch (err) {
-    status(`Failed to clear token: ${err instanceof Error ? err.message : String(err)}`, "err");
+    status(`Failed to clear token: ${describe(err)}`, "err");
   }
 }
 
@@ -536,7 +509,7 @@ async function onMarketplaceUpdate(): Promise<void> {
       status(`Marketplace updated — ${result.plugins.length} sandbox-safe plugins.`, "ok");
     }
   } catch (err) {
-    status(`Marketplace update failed: ${err instanceof Error ? err.message : String(err)}`, "err");
+    status(`Marketplace update failed: ${describe(err)}`, "err");
   } finally {
     marketplaceUpdating = false;
     btn.disabled = false;

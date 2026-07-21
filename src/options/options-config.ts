@@ -5,6 +5,7 @@
 import { openConfigStore, isSafeRelpath } from "../storage/config-store";
 import { readFolderUpload } from "./folder-upload";
 import { detectFormatLang, formatLua, formatVim } from "./options-format";
+import { el, emitStatus as status, refreshShell, describe, makeBoolPref, EVT_EDITOR_SET } from "./options-dom";
 
 const store = openConfigStore();
 let current = "init.lua"; // relpath being edited
@@ -13,25 +14,10 @@ let current = "init.lua"; // relpath being edited
 // which (with the status line) is the confirmation that the save landed.
 let savedValue = "";
 
-function el<T extends Element>(id: string): T {
-  const node = document.getElementById(id);
-  if (!node) throw new Error(`missing element #${id}`);
-  return node as unknown as T;
-}
-function status(message: string, kind: "ok" | "err" | "info"): void {
-  document.dispatchEvent(new CustomEvent("nib-status", { detail: { message, kind } }));
-}
-// Nudge the nav badges + Overview pane to re-read after a store write.
-function refreshShell(): void {
-  document.dispatchEvent(new CustomEvent("nib-refresh"));
-}
 // Signal the syntax-highlight overlay to repaint after a PROGRAMMATIC editor
 // value change (select/onFetch/onClear set editor.value without firing "input").
 function editorSet(): void {
-  document.dispatchEvent(new CustomEvent("nib-editor-set"));
-}
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  document.dispatchEvent(new CustomEvent(EVT_EDITOR_SET));
 }
 // Enable Save only when the editor has unsaved changes.
 function syncSaveButton(): void {
@@ -185,21 +171,9 @@ async function select(name: string): Promise<void> {
 // --- Formatting --------------------------------------------------------------
 // "Format on save" is a small UI preference; keep it in localStorage rather than
 // migrating the config-store meta schema for one boolean.
-const FORMAT_ON_SAVE_KEY = "nib:formatOnSave";
-function formatOnSaveEnabled(): boolean {
-  try {
-    return localStorage.getItem(FORMAT_ON_SAVE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-function setFormatOnSave(on: boolean): void {
-  try {
-    localStorage.setItem(FORMAT_ON_SAVE_KEY, on ? "1" : "0");
-  } catch {
-    // Private-mode / storage-disabled: the toggle just won't persist.
-  }
-}
+const formatOnSavePref = makeBoolPref("nib:formatOnSave", false);
+const formatOnSaveEnabled = (): boolean => formatOnSavePref.get();
+const setFormatOnSave = (on: boolean): void => formatOnSavePref.set(on);
 
 // Format `code` for `name`'s language, or null if unsupported or formatting
 // failed (never throws — a formatter failure must not block a save).
