@@ -57,46 +57,40 @@
 // content.js.
 //
 // Run: node scripts/overlay-smoke.mjs   (builds everything itself)
-import puppeteer from "puppeteer-core";
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
-import { mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  exists,
+  extensionLoaded,
+  fail,
+  launch,
+  resolveBrowser,
+  runWithHeadlessRetry,
+  unpackedExtensionId,
+  wait,
+} from "./lib/chrome.mjs";
+import { startFixtureServer } from "./lib/fixture-server.mjs";
+import { buildDist } from "./lib/build-dist.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const extDir = path.join(root, "dist", "chromium");
 const pagesDir = path.join(root, "test-pages");
-const SYSTEM_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 const shotPath = path.join(root, ".superpowers", "sdd", "task-7-overlay.png");
 const BOOT_TIMEOUT_MS = 60_000; // first boot compiles ~8MB wasm
 const SYNC_WAIT_MS = 900; // > 300ms debounce + slack
 const MIN_STRIP_H = 220;
 
-const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function fail(msg) {
-  console.error(`\nFAIL: ${msg}`);
-  process.exit(1);
-}
-
 // Rebuild dist/chromium. `testHooks` selects whether the test-only activation
 // hook (nvim-activate-test) is compiled in; production always sets it "false"
 // unless the env var is set, so make sure it's absent here.
 function buildProd() {
-  const env = { ...process.env };
-  delete env.NVIM_TEST_HOOKS;
-  execFileSync("node", ["scripts/build.mjs"], { cwd: root, env, stdio: "inherit" });
+  buildDist({ testHooks: false, root });
 }
 
 function buildTestHooks() {
-  execFileSync("node", ["scripts/build.mjs"], {
-    cwd: root,
-    env: { ...process.env, NVIM_TEST_HOOKS: "1" },
-    stdio: "inherit",
-  });
+  buildDist({ testHooks: true, root });
 }
 
 // Prove the dead-code elimination actually works: production build must not
@@ -113,111 +107,6 @@ async function assertProdHasNoTestHook() {
     );
   }
   console.log("ASSERT OK: production build has no test-activation hook string (dead-code eliminated)");
-}
-
-async function exists(p) {
-  try {
-    await stat(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function findChromeForTesting() {
-  const base = path.join(root, "chrome");
-  if (!(await exists(base))) return null;
-  const results = [];
-  async function walk(dir, depth) {
-    if (depth > 6) return;
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) await walk(full, depth + 1);
-      else if (
-        e.name === "Google Chrome for Testing" ||
-        e.name === "chrome" ||
-        e.name === "chrome.exe"
-      )
-        results.push(full);
-    }
-  }
-  await walk(base, 0);
-  return results[0] ?? null;
-}
-
-async function resolveBrowser() {
-  const env = process.env.NVIM_SMOKE_CHROME;
-  if (env) return { exec: env, label: `env NVIM_SMOKE_CHROME` };
-  const cft = await findChromeForTesting();
-  if (cft) return { exec: cft, label: "Chrome for Testing (./chrome)" };
-  if (await exists(SYSTEM_CHROME)) return { exec: SYSTEM_CHROME, label: "system Google Chrome" };
-  return null;
-}
-
-function unpackedExtensionId(dir) {
-  const hex = createHash("sha256").update(dir).digest("hex").slice(0, 32);
-  let id = "";
-  for (const ch of hex) id += String.fromCharCode(97 + parseInt(ch, 16));
-  return id;
-}
-
-async function launch(exec, headless) {
-  const defaults = await puppeteer.defaultArgs();
-  const defaultDisable = defaults.find((a) => a.startsWith("--disable-features="));
-  const feats = defaultDisable ? defaultDisable.slice("--disable-features=".length) : "";
-  const mergedDisable = `--disable-features=${feats ? feats + "," : ""}DisableLoadExtensionCommandLineSwitch`;
-  return puppeteer.launch({
-    executablePath: exec,
-    headless,
-    ignoreDefaultArgs: ["--disable-extensions", defaultDisable].filter(Boolean),
-    args: [
-      `--disable-extensions-except=${extDir}`,
-      `--load-extension=${extDir}`,
-      mergedDisable,
-      "--no-first-run",
-      "--no-default-browser-check",
-    ],
-  });
-}
-
-async function extensionLoaded(browser, id) {
-  const swTarget = await browser
-    .waitForTarget(
-      (t) => t.type() === "service_worker" && t.url().startsWith(`chrome-extension://${id}/`),
-      { timeout: 8_000 },
-    )
-    .catch(() => null);
-  return Boolean(swTarget);
-}
-
-// Minimal static server for the fixture directory on a random loopback port.
-function startFixtureServer() {
-  return new Promise((resolve) => {
-    const server = createServer(async (req, res) => {
-      const rel = decodeURIComponent((req.url ?? "/").split("?")[0]);
-      const file = path.join(pagesDir, rel === "/" ? "textarea.html" : rel.replace(/^\/+/, ""));
-      if (!file.startsWith(pagesDir)) {
-        res.writeHead(403).end("forbidden");
-        return;
-      }
-      try {
-        const body = await readFile(file);
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(body);
-      } catch {
-        res.writeHead(404).end("not found");
-      }
-    });
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      resolve({ server, baseUrl: `http://127.0.0.1:${port}` });
-    });
-  });
 }
 
 // Activate the overlay via the test-only postMessage hook: stamp the opt-in
@@ -321,7 +210,7 @@ function bridgeRoundtrip(page, selector, writeText) {
 }
 
 async function run(exec, headless, id, baseUrl) {
-  const browser = await launch(exec, headless);
+  const browser = await launch(exec, headless, extDir);
   try {
     if (!(await extensionLoaded(browser, id))) {
       await browser.close();
@@ -763,7 +652,7 @@ async function main() {
     if (!(await exists(path.join(extDir, "manifest.json")))) {
       throw new Error(`no build at ${extDir} after test build`);
     }
-    const browser = await resolveBrowser();
+    const browser = await resolveBrowser(root);
     if (!browser) {
       throw new Error(
         "no Chromium found. Install Chrome for Testing: " +
@@ -771,16 +660,16 @@ async function main() {
       );
     }
     const id = unpackedExtensionId(extDir);
-    const { server, baseUrl } = await startFixtureServer();
+    const { server, baseUrl } = await startFixtureServer(pagesDir, {
+      guardTraversal: true,
+      decodeUri: true,
+      contentType: () => "text/html; charset=utf-8",
+    });
     console.log(`browser: ${browser.label}`);
     console.log(`extension id: ${id}`);
     console.log(`fixture server: ${baseUrl}`);
 
-    let result = await run(browser.exec, true, id, baseUrl);
-    if (!result.ok && result.reason === "no-extension") {
-      console.log("headless extension load failed; retrying headed (headless:false)...");
-      result = await run(browser.exec, false, id, baseUrl);
-    }
+    let result = await runWithHeadlessRetry((headless) => run(browser.exec, headless, id, baseUrl));
     server.close();
 
     if (!result.ok && result.reason === "no-extension") {

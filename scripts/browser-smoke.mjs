@@ -35,16 +35,31 @@
 // com.google.Chrome cloud policy. That is why this repo prefers it.
 //
 // Run: npm run build   (once)   then   node scripts/browser-smoke.mjs
-import puppeteer from "puppeteer-core";
-import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { mkdir, readdir, stat } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import {
+  exists,
+  extensionLoaded,
+  fail,
+  launch,
+  resolveBrowser,
+  runWithHeadlessRetry,
+  unpackedExtensionId,
+  wait,
+} from "./lib/chrome.mjs";
+import {
+  idbClearConfig,
+  idbClearPlugins,
+  idbSetPluginEnabled,
+  idbWriteConfig,
+  idbWriteConfigFiles,
+  idbWritePlugin,
+} from "./lib/idb.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const extDir = path.join(root, "dist", "chromium");
 const shotPath = path.join(root, ".superpowers", "sdd", "task-6-boot.png");
-const SYSTEM_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 const BOOT_TIMEOUT_MS = 60_000; // first boot compiles ~11MB wasm
 // Safe-mode reboot: the broken config boot hangs its full 12s watchdog before
@@ -75,210 +90,8 @@ const IDLE_TEARDOWN_TEST_MS = 2_500;
 const IDLE_MARKER = "idle-teardown-marker"; // distinctive draft proving restore
 const SLEEP_POLL_TIMEOUT_MS = 15_000; // generous ceiling to observe sleeping===true
 
-const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function fail(msg) {
-  console.error(`\nFAIL: ${msg}`);
-  process.exit(1);
-}
-
 function errText(e) {
   return e instanceof Error ? e.message : String(e);
-}
-
-// ---- config-store IndexedDB helpers (PHASE C/D) --------------------------
-// The config store lives in the SAME origin DB the app uses: name
-// "nvim-in-browser", version 3, object store "config", file records keyed
-// "file:"+relpath and a single "meta" = {enabled}. We drive it directly from
-// the page context to simulate the options page having saved a config. The
-// app already created the stores, so we open at version 3 (never lower — a
-// lower version would abort with VersionError; Task 1 bumped the app DB to 3).
-function idbWriteConfig(page, initLua, enabled) {
-  return page.evaluate(
-    ({ initLua, enabled }) =>
-      new Promise((resolve, reject) => {
-        const open = indexedDB.open("nvim-in-browser", 3);
-        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
-        open.onblocked = () => reject(new Error("open blocked"));
-        open.onsuccess = () => {
-          const db = open.result;
-          let tx;
-          try {
-            tx = db.transaction("config", "readwrite");
-          } catch (e) {
-            db.close();
-            reject(new Error("tx open failed: " + (e?.message ?? String(e))));
-            return;
-          }
-          const store = tx.objectStore("config");
-          store.put(initLua, "file:init.lua");
-          store.put({ enabled }, "meta");
-          tx.oncomplete = () => {
-            db.close();
-            resolve(true);
-          };
-          tx.onerror = () => {
-            db.close();
-            reject(new Error("tx error: " + (tx.error?.message ?? "?")));
-          };
-        };
-      }),
-    { initLua, enabled },
-  );
-}
-
-// Cleanup: remove the config file and disable the config so a broken config
-// can't poison later phases, reruns, or a subsequent overlay-smoke.
-function idbClearConfig(page) {
-  return page.evaluate(
-    () =>
-      new Promise((resolve, reject) => {
-        const open = indexedDB.open("nvim-in-browser", 3);
-        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
-        open.onblocked = () => reject(new Error("open blocked"));
-        open.onsuccess = () => {
-          const db = open.result;
-          const tx = db.transaction("config", "readwrite");
-          const store = tx.objectStore("config");
-          store.delete("file:init.lua");
-          store.put({ enabled: false }, "meta");
-          tx.oncomplete = () => {
-            db.close();
-            resolve(true);
-          };
-          tx.onerror = () => {
-            db.close();
-            reject(new Error("clear tx error: " + (tx.error?.message ?? "?")));
-          };
-        };
-      }),
-  );
-}
-
-// Cleanup: empty the v3 "plugins" store so an installed/disabled plugin can't
-// poison later phases, reruns, or a subsequent overlay-smoke.
-function idbClearPlugins(page) {
-  return page.evaluate(
-    () =>
-      new Promise((resolve, reject) => {
-        const open = indexedDB.open("nvim-in-browser", 3);
-        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
-        open.onblocked = () => reject(new Error("open blocked"));
-        open.onsuccess = () => {
-          const db = open.result;
-          const tx = db.transaction("plugins", "readwrite");
-          const store = tx.objectStore("plugins");
-          store.clear();
-          tx.oncomplete = () => {
-            db.close();
-            resolve(true);
-          };
-          tx.onerror = () => {
-            db.close();
-            reject(new Error("clear tx error: " + (tx.error?.message ?? "?")));
-          };
-        };
-      }),
-  );
-}
-
-// Write a plugin record straight into the v3 "plugins" store (simulating the
-// options page having installed it). files: [{ path, text }] — text is encoded
-// to the Uint8Array the boot path expects.
-function idbWritePlugin(page, record) {
-  return page.evaluate(
-    (rec) =>
-      new Promise((resolve, reject) => {
-        const open = indexedDB.open("nvim-in-browser", 3);
-        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
-        open.onblocked = () => reject(new Error("open blocked"));
-        open.onsuccess = () => {
-          const db = open.result;
-          const tx = db.transaction("plugins", "readwrite");
-          const store = tx.objectStore("plugins");
-          const enc = new TextEncoder();
-          store.put(
-            {
-              name: rec.name,
-              source: "upload",
-              enabled: rec.enabled,
-              addedAt: 0,
-              files: rec.files.map((f) => ({ path: f.path, data: enc.encode(f.text) })),
-            },
-            rec.name,
-          );
-          tx.oncomplete = () => {
-            db.close();
-            resolve(true);
-          };
-          tx.onerror = () => {
-            db.close();
-            reject(new Error("tx error: " + (tx.error?.message ?? "?")));
-          };
-        };
-      }),
-    record,
-  );
-}
-
-// Flip an installed plugin's enabled flag in place.
-function idbSetPluginEnabled(page, name, enabled) {
-  return page.evaluate(
-    ({ name, enabled }) =>
-      new Promise((resolve, reject) => {
-        const open = indexedDB.open("nvim-in-browser", 3);
-        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
-        open.onsuccess = () => {
-          const db = open.result;
-          const tx = db.transaction("plugins", "readwrite");
-          const store = tx.objectStore("plugins");
-          const get = store.get(name);
-          get.onsuccess = () => {
-            const rec = get.result;
-            rec.enabled = enabled;
-            store.put(rec, name);
-          };
-          tx.oncomplete = () => {
-            db.close();
-            resolve(true);
-          };
-          tx.onerror = () => {
-            db.close();
-            reject(new Error("tx error: " + (tx.error?.message ?? "?")));
-          };
-        };
-      }),
-    { name, enabled },
-  );
-}
-
-// Write several config files at once (init.lua + lua/ modules), plus meta.
-function idbWriteConfigFiles(page, filesObj, enabled) {
-  return page.evaluate(
-    ({ filesObj, enabled }) =>
-      new Promise((resolve, reject) => {
-        const open = indexedDB.open("nvim-in-browser", 3);
-        open.onerror = () => reject(new Error("open failed: " + (open.error?.message ?? "?")));
-        open.onsuccess = () => {
-          const db = open.result;
-          const tx = db.transaction("config", "readwrite");
-          const store = tx.objectStore("config");
-          for (const [relpath, content] of Object.entries(filesObj)) {
-            store.put(content, "file:" + relpath);
-          }
-          store.put({ enabled }, "meta");
-          tx.oncomplete = () => {
-            db.close();
-            resolve(true);
-          };
-          tx.onerror = () => {
-            db.close();
-            reject(new Error("tx error: " + (tx.error?.message ?? "?")));
-          };
-        };
-      }),
-    { filesObj, enabled },
-  );
 }
 
 // Open a FRESH scratch page and wait for its engine-frame's __nvim.ready.
@@ -306,98 +119,8 @@ async function openScratchReady(browser, id, label, bootTimeout) {
   return { page: p, frame: f };
 }
 
-async function exists(p) {
-  try {
-    await stat(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Locate a Chrome-for-Testing binary under ./chrome (as laid down by
-// @puppeteer/browsers). Returns the first macOS/Linux/Windows binary found.
-async function findChromeForTesting() {
-  const base = path.join(root, "chrome");
-  if (!(await exists(base))) return null;
-  const results = [];
-  async function walk(dir, depth) {
-    if (depth > 6) return;
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) await walk(full, depth + 1);
-      else if (
-        e.name === "Google Chrome for Testing" ||
-        e.name === "chrome" ||
-        e.name === "chrome.exe"
-      )
-        results.push(full);
-    }
-  }
-  await walk(base, 0);
-  return results[0] ?? null;
-}
-
-async function resolveBrowser() {
-  const env = process.env.NVIM_SMOKE_CHROME;
-  if (env) return { exec: env, label: `env NVIM_SMOKE_CHROME` };
-  const cft = await findChromeForTesting();
-  if (cft) return { exec: cft, label: "Chrome for Testing (./chrome)" };
-  if (await exists(SYSTEM_CHROME)) return { exec: SYSTEM_CHROME, label: "system Google Chrome" };
-  return null;
-}
-
-// Chrome derives an unpacked extension's ID from the SHA-256 of its absolute
-// path: first 16 bytes, each hex nibble mapped 0-15 -> 'a'-'p'. Computing it
-// avoids depending on the (lazy) background service-worker target.
-function unpackedExtensionId(dir) {
-  const hex = createHash("sha256").update(dir).digest("hex").slice(0, 32);
-  let id = "";
-  for (const ch of hex) id += String.fromCharCode(97 + parseInt(ch, 16));
-  return id;
-}
-
-async function launch(exec, headless) {
-  // Puppeteer's defaults include `--disable-extensions` and a `--disable-features`
-  // list. Drop the former, and fold DisableLoadExtensionCommandLineSwitch into
-  // the latter (Chrome 137+ gates --load-extension behind that feature).
-  const defaults = await puppeteer.defaultArgs();
-  const defaultDisable = defaults.find((a) => a.startsWith("--disable-features="));
-  const feats = defaultDisable ? defaultDisable.slice("--disable-features=".length) : "";
-  const mergedDisable = `--disable-features=${feats ? feats + "," : ""}DisableLoadExtensionCommandLineSwitch`;
-  return puppeteer.launch({
-    executablePath: exec,
-    headless,
-    ignoreDefaultArgs: ["--disable-extensions", defaultDisable].filter(Boolean),
-    args: [
-      `--disable-extensions-except=${extDir}`,
-      `--load-extension=${extDir}`,
-      mergedDisable,
-      "--no-first-run",
-      "--no-default-browser-check",
-    ],
-  });
-}
-
-// Confirm the extension actually loaded (managed Chrome silently drops it).
-async function extensionLoaded(browser, id) {
-  const swTarget = await browser
-    .waitForTarget(
-      (t) => t.type() === "service_worker" && t.url().startsWith(`chrome-extension://${id}/`),
-      { timeout: 8_000 },
-    )
-    .catch(() => null);
-  return Boolean(swTarget);
-}
-
 async function run(exec, headless, id) {
-  const browser = await launch(exec, headless);
+  const browser = await launch(exec, headless, extDir);
   const wakeupLog = [];
   try {
     if (!(await extensionLoaded(browser, id))) {
@@ -966,7 +689,7 @@ async function main() {
   if (!(await exists(path.join(extDir, "manifest.json")))) {
     fail(`no build at ${extDir} — run \`npm run build\` first`);
   }
-  const browser = await resolveBrowser();
+  const browser = await resolveBrowser(root);
   if (!browser) {
     fail(
       "no Chromium found. Install Chrome for Testing: " +
@@ -979,11 +702,7 @@ async function main() {
 
   // Modern headless supports extensions; fall back to headed if the extension
   // fails to register (e.g. managed Chrome that blocks unpacked extensions).
-  let result = await run(browser.exec, true, id);
-  if (!result.ok && result.reason === "no-extension") {
-    console.log("headless extension load failed; retrying headed (headless:false)...");
-    result = await run(browser.exec, false, id);
-  }
+  let result = await runWithHeadlessRetry((headless) => run(browser.exec, headless, id));
   if (!result.ok && result.reason === "no-extension") {
     fail(
       `extension did not load in ${browser.label}. If this is a managed/MDM Chrome ` +

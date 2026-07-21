@@ -7,6 +7,7 @@
 // after a store write.
 import { openConfigStore } from "../storage/config-store";
 import { openPluginStore } from "../storage/plugin-store";
+import { EVT_REFRESH } from "./options-dom";
 
 const configStore = openConfigStore();
 const pluginStore = openPluginStore();
@@ -27,7 +28,7 @@ function showPane(name: string): void {
   }
   // The Overview pane is a live snapshot, so refresh it whenever it's shown.
   if (name === "overview") {
-    document.dispatchEvent(new CustomEvent("nib-refresh"));
+    document.dispatchEvent(new CustomEvent(EVT_REFRESH));
   }
 }
 
@@ -68,6 +69,6 @@ export function initNav(): void {
   }
   // Other modules dispatch nib-refresh after add/remove/toggle so the badges
   // (and the Overview pane) reflect the change without a page reload.
-  document.addEventListener("nib-refresh", () => void refreshBadges());
+  document.addEventListener(EVT_REFRESH, () => void refreshBadges());
   void refreshBadges();
 }
