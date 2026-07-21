@@ -10,6 +10,7 @@
 // file's bytes through the authenticated git-blobs API (base64), since raw
 // cannot serve private files with a token.
 import { isSafeRelpath } from "../storage/config-store";
+import { apiHeaders, isRateLimitStatus, treeUrl, rawUrl } from "./github-api";
 
 export type GithubFetchErrorKind =
   | "repo-not-found"
@@ -60,22 +61,13 @@ interface TreeEntry {
   sha?: string;
 }
 
-// api.github.com request headers. Accept is CORS-safelisted (no preflight);
-// Authorization (when a token is present) triggers a CORS preflight that
-// api.github.com answers — still no host_permissions needed.
-function apiHeaders(token?: string): Record<string, string> {
-  const h: Record<string, string> = { Accept: "application/vnd.github+json" };
-  if (token) h.Authorization = `Bearer ${token}`;
-  return h;
-}
-
 // Map a non-ok api.github.com response to a typed error. `null` when ok.
 function apiError(res: Response, repo: string, ref: string): GithubFetchError | null {
   if (res.ok) return null;
   if (res.status === 401) {
     return new GithubFetchError("unauthorized", "GitHub rejected the token (invalid, expired, or missing access)");
   }
-  if (res.status === 403 && res.headers.get("X-RateLimit-Remaining") === "0") {
+  if (isRateLimitStatus(res)) {
     return new GithubFetchError("rate-limited", "GitHub rate limit hit — add or check your token");
   }
   if (res.status === 404) {
@@ -127,7 +119,7 @@ export async function fetchGithubPlugin(
     if (!effectiveRef) effectiveRef = meta.default_branch ?? "main";
   }
 
-  const treeRes = await getApi(api(`/git/trees/${encodeURIComponent(effectiveRef)}?recursive=1`));
+  const treeRes = await getApi(treeUrl(owner, name, effectiveRef));
   const treeErr = apiError(treeRes, repo, effectiveRef);
   if (treeErr) throw treeErr;
 
@@ -160,10 +152,9 @@ export async function fetchGithubPlugin(
       }
       data = decodeBase64(blob.content);
     } else {
-      const rawUrl = `https://raw.githubusercontent.com/${owner}/${name}/${effectiveRef}/${b.path}`;
       let res: Response;
       try {
-        res = await fetchImpl(rawUrl);
+        res = await fetchImpl(rawUrl(owner, name, effectiveRef, b.path));
       } catch (e) {
         throw new GithubFetchError("network", e instanceof Error ? e.message : String(e));
       }
