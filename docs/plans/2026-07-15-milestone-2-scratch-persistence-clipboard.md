@@ -247,7 +247,7 @@ Call it once after `installBufferHooks()` (both modes), and on `document`'s `vis
 ### Task 4: Verify (browser smokes) + docs
 
 **Files:**
-- Modify: `scripts/browser-smoke.mjs` (add persistence + clipboard assertions), `README.md`, `docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md` (mark Milestone 2 done).
+- Modify: `scripts/browser-smoke.mjs` (add persistence + clipboard assertions), `README.md`, `docs/specs/2026-07-14-nvim-in-browser-design.md` (mark Milestone 2 done).
 
 - [ ] **Step 1: Persistence assertion in browser-smoke.** After the existing scratch boot, drive `__nvim.input("iremember this<Esc>")`, wait for the 400ms save debounce + slack (~800ms), then RELOAD the scratch page (`page.reload()` or reopen the scratch URL in a fresh page), wait for `__nvim.ready`, and assert `(await __nvim.getBufferText()).includes("remember this")`. This proves the IndexedDB round-trip. (IndexedDB persists across reloads within the same browser profile/userDataDir — puppeteer's default persists for the session; if the smoke uses a fresh context per run that's fine, the reload is same-context.)
 

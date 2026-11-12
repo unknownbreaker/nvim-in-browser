@@ -1207,7 +1207,7 @@ git commit -m "feat: textarea/input overlay content script with activation comma
 ### Task 8: Idle-CPU gate, docs, release
 
 **Files:**
-- Modify: `README.md` (usage), `docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md` (milestone 1 status + any interface reality-corrections), `memory/journal/2026-07-14.md` (observations)
+- Modify: `README.md` (usage), `docs/specs/2026-07-14-nvim-in-browser-design.md` (milestone 1 status + any interface reality-corrections), `memory/journal/2026-07-14.md` (observations)
 
 **Interfaces:** none new.
 

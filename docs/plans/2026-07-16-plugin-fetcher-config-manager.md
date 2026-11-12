@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Chrome MV3, IndexedDB, `fetch` (options-page context), vitest (pure-unit only — node has no IndexedDB), Puppeteer browser smoke.
 
-**Spec:** [docs/superpowers/specs/2026-07-16-plugin-fetcher-config-manager-design.md](../specs/2026-07-16-plugin-fetcher-config-manager-design.md)
+**Spec:** [docs/specs/2026-07-16-plugin-fetcher-config-manager-design.md](../specs/2026-07-16-plugin-fetcher-config-manager-design.md)
 
 ## Global Constraints
 
@@ -1554,7 +1554,7 @@ git commit -m "feat: multi-file config editor; options.ts becomes a shell"
 ### Task 10: Docs + full gate
 
 **Files:**
-- Modify: `README.md`, `docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md` (milestone tracker), `.claude/.../memory/nvim-in-browser-clean-engine.md` (if present in the working copy; else skip — it's outside the repo)
+- Modify: `README.md`, `docs/specs/2026-07-14-nvim-in-browser-design.md` (milestone tracker), `.claude/.../memory/nvim-in-browser-clean-engine.md` (if present in the working copy; else skip — it's outside the repo)
 
 - [ ] **Step 1: README** — in the "Options / config" section, replace the "Plugin bundling … is a planned follow-up" bullet with the real behavior: install pure-Lua/Vimscript plugins via `owner/repo` (GitHub, no extra permissions) or a folder upload; per-plugin enable/disable; the multi-file config editor; the master "Load my config" switch gates config + plugins. Keep the sandbox-limits list (still accurate: no process/network plugins).
 
@@ -1570,7 +1570,7 @@ git commit -m "feat: multi-file config editor; options.ts becomes a shell"
 - [ ] **Step 4: Commit**
 
 ```
-git add README.md docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md
+git add README.md docs/specs/2026-07-14-nvim-in-browser-design.md
 git commit -m "docs: plugin fetcher + multi-file config manager"
 ```
 

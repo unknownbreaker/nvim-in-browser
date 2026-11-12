@@ -323,7 +323,7 @@ Layered, TDD throughout:
    multi-file config; the master "Load my config" switch gates both config and
    plugins. Process/network plugins and plugin managers remain out of scope
    (WASM sandbox: no subprocess, no host network from Lua). See
-   [docs/superpowers/specs/2026-07-16-plugin-fetcher-config-manager-design.md](2026-07-16-plugin-fetcher-config-manager-design.md).
+   [docs/specs/2026-07-16-plugin-fetcher-config-manager-design.md](2026-07-16-plugin-fetcher-config-manager-design.md).
 5. **Hardening:** resource lifecycle, watchdog, safe mode, fidelity suite
    expansion, performance gates.
    ✅ **Done 2026-07-16** — the robustness layer landed across both repos:
