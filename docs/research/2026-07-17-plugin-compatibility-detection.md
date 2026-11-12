@@ -233,5 +233,5 @@ Neovim docs (job_control, provider, remote_plugin, treesitter, health); lazy.nvi
 awesome-neovim / neovimcraft / dotfyle; selene/full-moon, luaparse, web-tree-sitter +
 tree-sitter-lua; plenary/mini.test harnesses. Codebase: `src/engine/{nvim-host,client,
 worker,rpc}.ts`, `src/engine-frame/engine-frame.ts`, `src/plugins/{marketplace-discovery,
-pack-layout}.ts`, `docs/superpowers/plans/2026-07-1[45]-*prototype*.md`, `engine.lock.json`.
+pack-layout}.ts`, `docs/plans/2026-07-1[45]-*prototype*.md`, `engine.lock.json`.
 Exact stub errno semantics: the pinned `nvim-wasi@v0.1.0` artifact (`shims/*_stubs.c`).

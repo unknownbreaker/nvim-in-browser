@@ -36,7 +36,7 @@
 ### Task 2: Docs, release guard, v0.3.0
 
 **Files:**
-- Modify: `README.md` (Third-party engine section rewrite), `scripts/release.sh` (conditional guard via engine-info.json), `docs/superpowers/specs/2026-07-14-nvim-in-browser-design.md` (Milestone-1 implementation notes: engine now first-party), `nvim-wasm-prototype/STATUS.md` (rung 9 checked), journal.
+- Modify: `README.md` (Third-party engine section rewrite), `scripts/release.sh` (conditional guard via engine-info.json), `docs/specs/2026-07-14-nvim-in-browser-design.md` (Milestone-1 implementation notes: engine now first-party), `nvim-wasm-prototype/STATUS.md` (rung 9 checked), journal.
 
 - [ ] **Step 1:** release.sh: replace the unconditional ALLOW_UNLICENSED_ENGINE guard with a post-build check of `dist/chromium/engine-info.json` — if `source == "vendored"`, keep the refusal (env override still honored); if `cleanroom`, proceed (log "first-party engine, no license gate"). `bash -n` + a `--dry-run` both ways (vendored dry-run WITH the env var, cleanroom dry-run without).
 - [ ] **Step 2:** README: "Third-party engine" → "Engine" (first-party clean-room build; how to build it; vendored fallback documented as legacy + still-unlicensed caveat). STATUS.md: check rung 9 with the browser-smoke evidence. Spec: one-paragraph update.
